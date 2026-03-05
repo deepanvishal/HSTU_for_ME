@@ -25,3 +25,13 @@ result = subprocess.run(['pip', 'list'],
 for line in result.stdout.split('\n'):
     if 'generative' in line.lower():
         print(line)
+
+
+
+try:
+    from generative_recommenders.modeling.sequential.hstu import HSTU
+    print("HSTU import successful")
+except ImportError as e:
+    print(f"Import failed: {e}")
+except Exception as e:
+    print(f"Other error: {e}")
