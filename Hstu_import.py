@@ -35,3 +35,32 @@ except ImportError as e:
     print(f"Import failed: {e}")
 except Exception as e:
     print(f"Other error: {e}")
+
+
+
+
+
+import subprocess
+
+# clone manually with submodules
+result = subprocess.run([
+    'git', 'clone', '--recurse-submodules',
+    'https://github.com/facebookresearch/generative-recommenders.git'
+], capture_output=True, text=True)
+print(result.stdout)
+print(result.stderr)
+
+
+result = subprocess.run(
+    ['pip', 'install', '-e', './generative-recommenders'],
+    capture_output=True, text=True
+)
+print(result.stdout)
+print(result.stderr)
+
+
+try:
+    from generative_recommenders.modeling.sequential.hstu import HSTU
+    print("HSTU import successful")
+except Exception as e:
+    print(f"Failed: {e}")
