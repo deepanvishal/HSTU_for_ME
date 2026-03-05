@@ -166,3 +166,22 @@ result = subprocess.run(['grep', '-rn', 'class ',
                        './generative-recommenders/generative_recommenders/research/rails/similarities/'], 
                       capture_output=True, text=True)
 print(result.stdout)
+
+
+
+
+import subprocess
+
+# check output preprocessors
+result = subprocess.run(['grep', '-n', 'class ', 
+                       './generative-recommenders/generative_recommenders/research/modeling/sequential/output_preprocessors.py'], 
+                      capture_output=True, text=True)
+print("--- output_preprocessors ---")
+print(result.stdout)
+
+# check LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor signature
+result = subprocess.run(['grep', '-n', 'def __init__', 
+                       './generative-recommenders/generative_recommenders/research/modeling/sequential/input_features_preprocessors.py'], 
+                      capture_output=True, text=True)
+print("--- input preprocessor init ---")
+print(result.stdout)
