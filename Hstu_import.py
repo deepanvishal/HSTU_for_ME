@@ -210,3 +210,11 @@ result = subprocess.run(['sed', '-n', '94,150p',
                       capture_output=True, text=True)
 print("--- preprocessor 2 init ---")
 print(result.stdout)
+
+
+
+import subprocess
+result = subprocess.run(['cat', 
+   './generative-recommenders/generative_recommenders/research/modeling/sequential/input_features_preprocessors.py'], 
+   capture_output=True, text=True)
+print(result.stdout)
