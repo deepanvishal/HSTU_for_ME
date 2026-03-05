@@ -1,10 +1,13 @@
-CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.member_profile_snapshot` AS
+-- ============================================================
+-- TABLE 2: MEMBER PROFILE SNAPSHOT
+-- ============================================================
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_member_profile_snapshot` AS
 
 WITH member_visits AS (
     SELECT DISTINCT
         member_id
         ,visit_date
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.visit_table`
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_table`
 )
 
 ,prior_claims AS (
@@ -22,8 +25,8 @@ WITH member_visits AS (
 SELECT
     member_id
     ,visit_date
-    ,ARRAY_AGG(DISTINCT pri_icd9_dx_ccd IGNORE NULLS)  AS prior_dx_list
-    ,MAX(gender_cd)                                     AS gender_cd
+    ,ARRAY_AGG(DISTINCT pri_icd9_dx_ccd IGNORE NULLS) AS prior_dx_list
+    ,MAX(gender_cd)                                    AS gender_cd
 FROM prior_claims
 GROUP BY
     member_id
