@@ -82,3 +82,13 @@ result = subprocess.run(['ls', './generative-recommenders/generative_recommender
                       capture_output=True, text=True)
 print(result.stdout)
 print(result.stderr)
+
+
+import sys
+sys.path.insert(0, './generative-recommenders')
+
+try:
+    from generative_recommenders.modeling.sequential.hstu import HSTU
+    print("HSTU import successful")
+except Exception as e:
+    print(f"Failed: {e}")
