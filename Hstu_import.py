@@ -185,3 +185,28 @@ result = subprocess.run(['grep', '-n', 'def __init__',
                       capture_output=True, text=True)
 print("--- input preprocessor init ---")
 print(result.stdout)
+
+
+
+
+
+import subprocess
+
+# full content of output_preprocessors
+result = subprocess.run(['cat', 
+                       './generative-recommenders/generative_recommenders/research/modeling/sequential/output_preprocessors.py'], 
+                      capture_output=True, text=True)
+print(result.stdout)
+
+# get lines around each __init__ in input_features_preprocessors
+result = subprocess.run(['sed', '-n', '44,90p',
+                       './generative-recommenders/generative_recommenders/research/modeling/sequential/input_features_preprocessors.py'], 
+                      capture_output=True, text=True)
+print("--- preprocessor 1 init ---")
+print(result.stdout)
+
+result = subprocess.run(['sed', '-n', '94,150p',
+                       './generative-recommenders/generative_recommenders/research/modeling/sequential/input_features_preprocessors.py'], 
+                      capture_output=True, text=True)
+print("--- preprocessor 2 init ---")
+print(result.stdout)
