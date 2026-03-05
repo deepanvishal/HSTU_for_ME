@@ -64,3 +64,21 @@ try:
     print("HSTU import successful")
 except Exception as e:
     print(f"Failed: {e}")
+
+
+
+
+
+
+
+import subprocess
+
+result = subprocess.run(['ls', './generative-recommenders'], 
+                      capture_output=True, text=True)
+print(result.stdout)
+print(result.stderr)
+
+result = subprocess.run(['ls', './generative-recommenders/generative_recommenders'], 
+                      capture_output=True, text=True)
+print(result.stdout)
+print(result.stderr)
