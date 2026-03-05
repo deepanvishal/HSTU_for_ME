@@ -20,26 +20,20 @@ SELECT
     member_id
     ,visit_date
     ,visit_seq_num
-    ,ARRAY_AGG(DISTINCT specialty IGNORE NULLS
-        ORDER BY specialty)                             AS specialties_180
+    ,ARRAY_AGG(DISTINCT specialty IGNORE NULLS)         AS specialties_180
     ,ARRAY_AGG(DISTINCT CASE
         WHEN days_to_future_visit <= 30
-        THEN specialty END IGNORE NULLS
-        ORDER BY specialty)                             AS specialties_30
+        THEN specialty END IGNORE NULLS)                AS specialties_30
     ,ARRAY_AGG(DISTINCT CASE
         WHEN days_to_future_visit <= 60
-        THEN specialty END IGNORE NULLS
-        ORDER BY specialty)                             AS specialties_60
+        THEN specialty END IGNORE NULLS)                AS specialties_60
     ,ARRAY_AGG(DISTINCT CASE
         WHEN days_to_future_visit <= 30
-        THEN provider END IGNORE NULLS
-        ORDER BY provider)                              AS providers_30
+        THEN provider END IGNORE NULLS)                 AS providers_30
     ,ARRAY_AGG(DISTINCT CASE
         WHEN days_to_future_visit <= 60
-        THEN provider END IGNORE NULLS
-        ORDER BY provider)                              AS providers_60
-    ,ARRAY_AGG(DISTINCT provider IGNORE NULLS
-        ORDER BY provider)                              AS providers_180
+        THEN provider END IGNORE NULLS)                 AS providers_60
+    ,ARRAY_AGG(DISTINCT provider IGNORE NULLS)          AS providers_180
 FROM visit_pairs
 CROSS JOIN UNNEST(future_specialty_codes)               AS specialty
 CROSS JOIN UNNEST(future_provider_ids)                  AS provider
