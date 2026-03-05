@@ -20,7 +20,7 @@ SELECT
     ,v.visit_date
     ,v.visit_seq_num
     ,COALESCE(v.delta_t, 0)                            AS delta_t
-    ,FLOOR(LOG(GREATEST(1, ABS(COALESCE(v.delta_t, 0)))) / 0.301) AS delta_t_bucket
+    ,FLOOR(LOG10(GREATEST(1, ABS(COALESCE(delta_t, 0)))) / 0.301) AS delta_t_bucket
     ,v.provider_ids
     ,v.specialty_codes
     ,v.dx_list
