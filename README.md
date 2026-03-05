@@ -1,6 +1,6 @@
 # Provider Affiliation & Next Visit Prediction
 **ML System Design Document — HSTU Architecture**  
-CVS Aetna — Healthcare Data Science
+Healthcare Data Science
 
 ---
 
