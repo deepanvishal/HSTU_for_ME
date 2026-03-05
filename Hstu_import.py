@@ -144,3 +144,9 @@ from generative_recommenders.research.modeling.sequential.hstu import HSTU
 
 import inspect
 print(inspect.signature(HSTU.__init__))
+
+
+import subprocess
+result = subprocess.run(['ls', './generative-recommenders/generative_recommenders/research/modeling/sequential'], 
+                      capture_output=True, text=True)
+print(result.stdout)
