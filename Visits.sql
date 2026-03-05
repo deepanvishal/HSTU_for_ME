@@ -1,4 +1,7 @@
-CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.visit_table` AS
+-- ============================================================
+-- TABLE 1: VISIT TABLE
+-- ============================================================
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_table` AS
 
 WITH filtered_claims AS (
     SELECT
@@ -32,13 +35,13 @@ WITH filtered_claims AS (
 
 SELECT
     f.member_id
-    ,f.srv_start_dt                          AS visit_date
-    ,ARRAY_AGG(DISTINCT f.srv_prvdr_id)      AS provider_ids
-    ,ARRAY_AGG(DISTINCT f.specialty_ctg_cd)  AS specialty_codes
-    ,ARRAY_AGG(DISTINCT f.pri_icd9_dx_ccd)   AS dx_list
-    ,ARRAY_AGG(DISTINCT f.prcdr_cd)          AS procedure_codes
-    ,ARRAY_AGG(DISTINCT f.plc_srv_cd)        AS place_of_service
-    ,MAX(f.gender_cd)                        AS gender_cd
+    ,f.srv_start_dt                             AS visit_date
+    ,ARRAY_AGG(DISTINCT f.srv_prvdr_id)         AS provider_ids
+    ,ARRAY_AGG(DISTINCT f.specialty_ctg_cd)     AS specialty_codes
+    ,ARRAY_AGG(DISTINCT f.pri_icd9_dx_ccd)      AS dx_list
+    ,ARRAY_AGG(DISTINCT f.prcdr_cd)             AS procedure_codes
+    ,ARRAY_AGG(DISTINCT f.plc_srv_cd)           AS place_of_service
+    ,MAX(f.gender_cd)                           AS gender_cd
 FROM filtered_claims f
 INNER JOIN member_visit_counts m
     ON f.member_id = m.member_id
