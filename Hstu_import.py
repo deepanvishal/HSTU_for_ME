@@ -150,3 +150,19 @@ import subprocess
 result = subprocess.run(['ls', './generative-recommenders/generative_recommenders/research/modeling/sequential'], 
                       capture_output=True, text=True)
 print(result.stdout)
+
+
+import subprocess
+
+for f in ['embedding_modules.py', 'input_features_preprocessors.py', 'output_preprocessors.py', 'features.py']:
+    result = subprocess.run(['grep', '-n', 'class ', 
+                           f'./generative-recommenders/generative_recommenders/research/modeling/sequential/{f}'], 
+                          capture_output=True, text=True)
+    print(f"\n--- {f} ---")
+    print(result.stdout)
+
+
+result = subprocess.run(['grep', '-rn', 'class ', 
+                       './generative-recommenders/generative_recommenders/research/rails/similarities/'], 
+                      capture_output=True, text=True)
+print(result.stdout)
