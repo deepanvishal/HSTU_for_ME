@@ -218,3 +218,11 @@ result = subprocess.run(['cat',
    './generative-recommenders/generative_recommenders/research/modeling/sequential/input_features_preprocessors.py'], 
    capture_output=True, text=True)
 print(result.stdout)
+
+
+
+import subprocess
+result = subprocess.run(['cat', 
+   './generative-recommenders/generative_recommenders/research/modeling/sequential/features.py'], 
+   capture_output=True, text=True)
+print(result.stdout)
