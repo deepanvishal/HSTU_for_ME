@@ -9,3 +9,19 @@ print(result.stderr)
 from generative_recommenders.ops.jagged import jagged_self_attention
 from generative_recommenders.modeling.sequential.hstu import HSTU
 print("HSTU available")
+
+
+# correct import path
+from generative_recommenders.modeling.sequential.hstu import HSTU
+
+import subprocess
+result = subprocess.run(['pip', 'show', 'generative-recommenders'], 
+                      capture_output=True, text=True)
+print(result.stdout)
+
+result = subprocess.run(['pip', 'list'], 
+                      capture_output=True, text=True)
+# filter for generative
+for line in result.stdout.split('\n'):
+    if 'generative' in line.lower():
+        print(line)
