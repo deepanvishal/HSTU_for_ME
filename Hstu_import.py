@@ -128,3 +128,19 @@ except Exception as e:
 result = subprocess.run(['ls', './generative-recommenders/generative_recommenders/research'], 
                       capture_output=True, text=True)
 print(result.stdout)
+
+
+
+
+
+
+
+import sys
+sys.path.insert(0, './generative-recommenders')
+
+from generative_recommenders.research.modeling.sequential.hstu import HSTU
+
+
+
+import inspect
+print(inspect.signature(HSTU.__init__))
