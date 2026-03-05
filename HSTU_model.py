@@ -58,13 +58,21 @@ ORDER BY member_id, visit_seq_num
 CHUNK_SIZE = 100_000
 
 # sequence
-for chunk in client.query(sequence_query).to_dataframe_iterable(max_results=CHUNK_SIZE):
+job = client.query(sequence_query)
+df  = job.to_dataframe()
+for start in range(0, len(df), CHUNK_SIZE):
+    chunk = df.iloc[start:start + CHUNK_SIZE]
     process_sequence_chunk(chunk)
     del chunk
+del df
 
 # labels
-for chunk in client.query(label_query).to_dataframe_iterable(max_results=CHUNK_SIZE):
+job = client.query(label_query)
+df  = job.to_dataframe()
+for start in range(0, len(df), CHUNK_SIZE):
+    chunk = df.iloc[start:start + CHUNK_SIZE]
     process_label_chunk(chunk)
     del chunk
+del df
 
 print(f"Members loaded: {len(member_sequences)}")
