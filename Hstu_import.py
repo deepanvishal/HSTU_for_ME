@@ -338,3 +338,14 @@ INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_member
     ON l.member_id = m.member_id
 ORDER BY l.member_id, l.visit_seq_num
 """
+
+
+from generative_recommenders.research.modeling.sequential import embedding_modules
+from generative_recommenders.research.modeling.sequential import input_features_preprocessors
+from generative_recommenders.research.modeling.sequential import output_postprocessors
+from generative_recommenders.research.rails.similarities import module as sim_module
+
+print(dir(embedding_modules))
+print(dir(input_features_preprocessors))
+print(dir(output_postprocessors))
+print(dir(sim_module))
