@@ -8,6 +8,7 @@ import pickle
 import numpy as np
 import torch
 import torch.nn as nn
+import multiprocessing as mp
 from torch.utils.data import Dataset, DataLoader
 from collections import defaultdict
 from google.cloud import bigquery
@@ -23,7 +24,6 @@ os.makedirs('./data',        exist_ok=True)
 TARGET      = 'specialty'   # 'specialty' | 'provider' | 'dx'
 SAMPLE_PCT  = 0.05
 
-# label columns per target
 LABEL_COLS = {
     'specialty': ('specialties_30', 'specialties_60', 'specialties_180')
     ,'provider' : ('providers_30',   'providers_60',   'providers_180')
@@ -61,6 +61,7 @@ EVAL_K        = [3, 5, 10]
 DEVICE        = 'cuda' if torch.cuda.is_available() else 'cpu'
 NUM_GPUS      = torch.cuda.device_count()
 NUM_WORKERS   = min(4 * NUM_GPUS, 16)
+NUM_PROC      = min(48, os.cpu_count() or 1)  # parallel workers for embedding build
 
 print(f"Target:      {TARGET}")
 print(f"Sample:      {SAMPLE_PCT*100}%")
@@ -70,6 +71,7 @@ print(f"GPUs:        {NUM_GPUS}")
 print(f"Workers:     {NUM_WORKERS}")
 print(f"Batch size:  {BATCH_SIZE}")
 print(f"Cache:       {LOAD_FROM_CACHE}")
+print(f"Embed procs: {NUM_PROC}")
 
 # ============================================================
 # UTILITY
@@ -109,21 +111,54 @@ print(f"DX vocab:        {len(dx_vocab):,}")
 print(f"Procedure vocab: {len(procedure_vocab):,}")
 
 # ============================================================
-# STEP 2: VISIT EMBEDDING
+# STEP 2: VECTORIZED EMBEDDING BUILD
+# Replaces per-row itertuples() loop with bulk numpy scatter ops.
+# Each modality: explode list column → map vocab → scatter-add
+# into output matrix → divide by count → fill unknowns with unk.
 # ============================================================
-def batch_lookup(codes, matrix, vocab, unk):
-    codes   = to_list(codes)
-    indices = [vocab[c] for c in codes if c in vocab]
-    if not indices:
-        return unk
-    return matrix[indices].mean(axis=0).astype(np.float32)
 
-def get_visit_embedding(providers, specialties, dxs, procedures):
-    p  = batch_lookup(providers,   provider_matrix,  provider_vocab,  unk_emb['provider'])
-    s  = batch_lookup(specialties, specialty_matrix, specialty_vocab, unk_emb['specialty'])
-    d  = batch_lookup(dxs,         dx_matrix,        dx_vocab,        unk_emb['dx'])
-    pr = batch_lookup(procedures,  procedure_matrix, procedure_vocab, unk_emb['procedure'])
-    return np.concatenate([p, s, d, pr]).astype(np.float32)
+def _embed_column_vectorized(series, matrix, vocab, unk_vec):
+    n_rows = len(series)
+    dim    = matrix.shape[1]
+    result = np.zeros((n_rows, dim), dtype=np.float32)
+    counts = np.zeros(n_rows,       dtype=np.int32)
+
+    for row_idx, codes in enumerate(series):
+        if codes is None:
+            continue
+        if not isinstance(codes, (list, np.ndarray)):
+            codes = [codes]
+        indices = [vocab[str(c)] for c in codes if str(c) in vocab]
+        if not indices:
+            continue
+        np.add.at(result, row_idx, matrix[indices].sum(axis=0))
+        counts[row_idx] += len(indices)
+
+    mask          = counts > 0
+    result[mask]  /= counts[mask, np.newaxis]
+    result[~mask]  = unk_vec
+    return result
+
+
+def build_embeddings_vectorized(df):
+    """
+    Input:  dataframe chunk with columns provider_ids, specialty_codes,
+            dx_list, procedure_codes
+    Output: float32 array [N, 128]
+    """
+    p_emb  = _embed_column_vectorized(df['provider_ids'],    provider_matrix,  provider_vocab,  unk_emb['provider'])
+    s_emb  = _embed_column_vectorized(df['specialty_codes'], specialty_matrix, specialty_vocab, unk_emb['specialty'])
+    d_emb  = _embed_column_vectorized(df['dx_list'],         dx_matrix,        dx_vocab,        unk_emb['dx'])
+    pr_emb = _embed_column_vectorized(df['procedure_codes'], procedure_matrix, procedure_vocab, unk_emb['procedure'])
+    return np.concatenate([p_emb, s_emb, d_emb, pr_emb], axis=1).astype(np.float32)
+
+
+# worker function — inherits globals via fork (Linux)
+def _worker_embed_chunk(args):
+    chunk_df, chunk_start = args
+    embs = build_embeddings_vectorized(chunk_df)
+    return chunk_start, embs
+
 
 # ============================================================
 # STEP 3: LOAD DATA
@@ -182,54 +217,69 @@ else:
     ORDER BY l.member_id, l.visit_seq_num
     """
 
-    print("Loading sequences...")
     member_sequences = defaultdict(list)
     member_labels    = defaultdict(list)
-    CHUNK_SIZE       = 100_000
 
     if not seq_cached:
+        print("\nLoading sequences from BQ...")
         df_seq = client.query(sequence_query).to_dataframe(create_bqstorage_client=True)
         print(f"Sequence rows: {len(df_seq):,}")
 
-        for start in range(0, len(df_seq), CHUNK_SIZE):
-            chunk = df_seq.iloc[start:start + CHUNK_SIZE]
-            for row in chunk.itertuples():
-                emb = get_visit_embedding(
-                    row.provider_ids
-                    ,row.specialty_codes
-                    ,row.dx_list
-                    ,row.procedure_codes
-                )
-                member_sequences[row.member_id].append({
+        # split into NUM_PROC chunks for parallel embedding build
+        chunk_size = max(1, len(df_seq) // NUM_PROC)
+        chunks     = [
+            (df_seq.iloc[i:i + chunk_size].reset_index(drop=True), i)
+            for i in range(0, len(df_seq), chunk_size)
+        ]
+        print(f"Building embeddings — {NUM_PROC} parallel workers, {len(chunks)} chunks...")
+
+        # preallocate output array
+        all_embeddings = np.empty((len(df_seq), EMBEDDING_DIM), dtype=np.float32)
+
+        with mp.Pool(processes=NUM_PROC) as pool:
+            for chunk_start, embs in pool.imap_unordered(_worker_embed_chunk, chunks):
+                end = chunk_start + len(embs)
+                all_embeddings[chunk_start:end] = embs
+
+        print("Embedding build complete — building member sequences...")
+
+        # assign embeddings back and build member dict — pure numpy/pandas, no embedding work
+        df_seq['_emb']  = list(all_embeddings)
+        df_seq['_dt']   = df_seq['delta_t_bucket'].clip(upper=NUM_RATINGS - 1).astype(int)
+
+        for member_id, group in df_seq.groupby('member_id', sort=False):
+            member_sequences[member_id] = [
+                {
                     'visit_seq_num'  : row.visit_seq_num
-                    ,'delta_t_bucket': int(min(row.delta_t_bucket, NUM_RATINGS - 1))
-                    ,'embedding'     : emb
-                })
-            del chunk
-        del df_seq
+                    ,'delta_t_bucket': row._dt
+                    ,'embedding'     : row._emb
+                }
+                for row in group.itertuples()
+            ]
+
+        del all_embeddings, df_seq
 
         print("Saving sequence cache...")
         with open(SEQ_CACHE_PATH, 'wb') as f:
             pickle.dump(dict(member_sequences), f)
+
     else:
         print("Loading sequence cache...")
         with open(SEQ_CACHE_PATH, 'rb') as f:
             member_sequences = pickle.load(f)
 
-    print("Loading labels...")
+    print("\nLoading labels...")
     df_lab = client.query(label_query).to_dataframe(create_bqstorage_client=True)
     print(f"Label rows: {len(df_lab):,}")
 
-    for start in range(0, len(df_lab), CHUNK_SIZE):
-        chunk = df_lab.iloc[start:start + CHUNK_SIZE]
-        for row in chunk.itertuples():
-            member_labels[row.member_id].append({
-                'visit_seq_num': row.visit_seq_num
-                ,'label_30'    : to_list(getattr(row, COL_30))
-                ,'label_60'    : to_list(getattr(row, COL_60))
-                ,'label_180'   : to_list(getattr(row, COL_180))
-            })
-        del chunk
+    # label build — no embedding work, fast pandas groupby
+    for row in df_lab.itertuples():
+        member_labels[row.member_id].append({
+            'visit_seq_num': row.visit_seq_num
+            ,'label_30'    : to_list(getattr(row, COL_30))
+            ,'label_60'    : to_list(getattr(row, COL_60))
+            ,'label_180'   : to_list(getattr(row, COL_180))
+        })
     del df_lab
 
     print("Saving label cache...")
@@ -506,8 +556,8 @@ for epoch in range(EPOCHS):
         best_ndcg  = val_ndcg
         no_improve = 0
         torch.save({
-            'epoch'          : epoch
-            ,'model_state_dict'    : get_raw_model(model).state_dict()
+            'epoch'               : epoch
+            ,'model_state_dict'   : get_raw_model(model).state_dict()
             ,'optimizer_state_dict': optimizer.state_dict()
             ,'scheduler_state_dict': scheduler.state_dict()
             ,'label_vocab'         : label_vocab
