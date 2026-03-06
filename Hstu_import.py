@@ -239,7 +239,6 @@ for pkg in ['node2vec', 'gensim', 'networkx']:
         print(f"{pkg} -- NOT installed")
 
 
-
 WITH dx_members AS (
     SELECT DISTINCT
         member_id
@@ -251,8 +250,12 @@ WITH dx_members AS (
 ,rare_dx_members AS (
     SELECT DISTINCT member_id
     FROM dx_members
-    GROUP BY dx_code
-    HAVING COUNT(DISTINCT member_id) < 100
+    WHERE dx_code IN (
+        SELECT dx_code
+        FROM dx_members
+        GROUP BY dx_code
+        HAVING COUNT(DISTINCT member_id) < 100
+    )
 )
 
 ,random_sample AS (
