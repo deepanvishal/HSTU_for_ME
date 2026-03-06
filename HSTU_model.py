@@ -221,15 +221,15 @@ else:
         print("Embedding build complete — building member sequences...")
 
         # assign embeddings back and build member dict — pure numpy/pandas, no embedding work
-        df_seq['_emb']  = list(all_embeddings)
-        df_seq['_dt']   = df_seq['delta_t_bucket'].clip(upper=NUM_RATINGS - 1).astype(int)
+        df_seq['visit_emb']  = list(all_embeddings)
+        df_seq['dt_bucket']   = df_seq['delta_t_bucket'].clip(upper=NUM_RATINGS - 1).astype(int)
 
         for member_id, group in df_seq.groupby('member_id', sort=False):
             member_sequences[member_id] = [
                 {
                     'visit_seq_num'  : row.visit_seq_num
-                    ,'delta_t_bucket': row._dt
-                    ,'embedding'     : row._emb
+                    ,'delta_t_bucket': row.dt_bucket
+                    ,'embedding'     : row.visit_emb
                 }
                 for row in group.itertuples()
             ]
