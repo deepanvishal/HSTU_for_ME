@@ -237,3 +237,43 @@ for pkg in ['node2vec', 'gensim', 'networkx']:
         print(f"{pkg} -- installed")
     else:
         print(f"{pkg} -- NOT installed")
+
+
+
+WITH dx_members AS (
+    SELECT DISTINCT
+        member_id
+        ,dx_code
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence`
+    CROSS JOIN UNNEST(dx_list) AS dx_code
+)
+
+,rare_dx_members AS (
+    SELECT DISTINCT member_id
+    FROM dx_members
+    GROUP BY dx_code
+    HAVING COUNT(DISTINCT member_id) < 100
+)
+
+,random_sample AS (
+    SELECT DISTINCT member_id
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence`
+    WHERE RAND() < 0.1
+)
+
+,sampled_members AS (
+    SELECT member_id FROM rare_dx_members
+    UNION DISTINCT
+    SELECT member_id FROM random_sample
+)
+
+SELECT
+    s.member_id
+    ,s.visit_seq_num
+    ,s.provider_ids
+    ,s.specialty_codes
+    ,s.dx_list
+    ,s.procedure_codes
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence` s
+INNER JOIN sampled_members m ON s.member_id = m.member_id
+ORDER BY s.member_id, s.visit_seq_num
