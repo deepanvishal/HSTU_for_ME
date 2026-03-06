@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional, Tuple
 
 
 class RelativeBucketedTimeAndPositionBias(nn.Module):
@@ -25,12 +26,10 @@ class RelativeBucketedTimeAndPositionBias(nn.Module):
         N      = self._max_seq_len
         device = all_timestamps.device
 
-        # recompute pos_bias during training (params change), cache during eval
         if self.training or self._cached_pos_bias is None:
             self._cached_pos_bias = self._compute_pos_bias(device)
         pos_bias = self._cached_pos_bias.to(device)  # [1, N, N]
 
-        # time bias [B, N, N]
         ext     = torch.cat([all_timestamps, all_timestamps[:, N-1:N]], dim=1)
         diff    = ext[:, 1:].unsqueeze(2) - ext[:, :-1].unsqueeze(1)
         buckets = torch.clamp(
@@ -80,11 +79,12 @@ class HSTUBlock(nn.Module):
 
     def forward(
         self
-        ,x:           torch.Tensor   # [B, N, D]
-        ,timestamps:  torch.Tensor   # [B, N] int64
-        ,causal_mask: torch.Tensor   # [N, N] bool
-        ,pad_mask:    torch.Tensor   # [B, N] bool
-    ) -> torch.Tensor:
+        ,x:                 torch.Tensor        # [B, N, D]
+        ,timestamps:        torch.Tensor        # [B, N] int64
+        ,causal_mask:       torch.Tensor        # [N, N] bool
+        ,pad_mask:          torch.Tensor        # [B, N] bool
+        ,return_attention:  bool = False
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         B, N, D = x.shape
         H  = self._num_heads
         Dv = self._linear_dim
@@ -92,40 +92,38 @@ class HSTUBlock(nn.Module):
 
         normed = self._norm_x(x)
 
-        # fused uvqk projection + silu
         out = F.silu(normed.reshape(B * N, D) @ self._uvqk)
         u, v, q, k = torch.split(out, [H * Dv, H * Dv, H * Dq, H * Dq], dim=-1)
 
-        # reshape for bmm: [B*H, N, Dq/Dv]
         q = q.view(B, N, H, Dq).permute(0, 2, 1, 3).reshape(B * H, N, Dq)
         k = k.view(B, N, H, Dq).permute(0, 2, 1, 3).reshape(B * H, N, Dq)
         v = v.view(B, N, H, Dv).permute(0, 2, 1, 3).reshape(B * H, N, Dv)
 
-        # attention scores via bmm [B, H, N, N]
+        # attention scores [B, H, N, N]
         qk = torch.bmm(q, k.transpose(1, 2)).view(B, H, N, N)
 
-        # relative bias [B, N, N] → [B, 1, N, N]
         rel_bias = self._rel_bias(timestamps).unsqueeze(1)
         qk = qk + rel_bias
-
-        # silu attention (not softmax)
         qk = F.silu(qk) / N
-
-        # causal + padding masks
         qk = qk.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), 0.0)
         qk = qk.masked_fill(pad_mask.unsqueeze(1).unsqueeze(2),    0.0)
         qk = F.dropout(qk, p=self._attn_dropout, training=self.training)
 
-        # weighted sum via bmm
+        # optionally capture attention before dropout for analysis
+        attn_weights = None
+        if return_attention:
+            # mean across heads, then mean across query positions → [B, N]
+            # represents how much each key position was attended to on average
+            attn_weights = qk.mean(dim=1).mean(dim=1)  # [B, N]
+
         attn_out = torch.bmm(qk.reshape(B * H, N, N), v).view(B, H, N, Dv)
         attn_out = attn_out.permute(0, 2, 1, 3).reshape(B, N, H * Dv)
 
-        # norm + gate + output projection + residual
         attn_out = self._norm_attn(attn_out)
         u_flat   = u.view(B, N, H * Dv)
         out      = self._o(self._dropout(u_flat * attn_out)) + x
 
-        return out.masked_fill(pad_mask.unsqueeze(-1), 0.0)
+        return out.masked_fill(pad_mask.unsqueeze(-1), 0.0), attn_weights
 
 
 class PureHSTU(nn.Module):
@@ -146,6 +144,7 @@ class PureHSTU(nn.Module):
         super().__init__()
 
         self._max_seq_len = max_seq_len
+        self._num_blocks  = num_blocks
         hstu_dim          = embedding_dim + rating_dim
 
         self._rating_emb    = nn.Embedding(num_ratings, rating_dim)
@@ -186,10 +185,11 @@ class PureHSTU(nn.Module):
 
     def forward(
         self
-        ,embeddings: torch.Tensor  # [B, N, D]
-        ,delta_t:    torch.Tensor  # [B, N] int64
-        ,lengths:    torch.Tensor  # [B]    int64
-    ):
+        ,embeddings:        torch.Tensor        # [B, N, D]
+        ,delta_t:           torch.Tensor        # [B, N] int64
+        ,lengths:           torch.Tensor        # [B]    int64
+        ,return_attention:  bool = False
+    ) -> Tuple:
         B, N, D = embeddings.shape
         device  = embeddings.device
 
@@ -201,15 +201,29 @@ class PureHSTU(nn.Module):
         x   = self._input_dropout(x)
         x   = x.masked_fill(pad_mask.unsqueeze(-1), 0.0)
 
+        # collect attention weights per block
+        block_attn_weights = []
         for block in self._blocks:
-            x = block(x, delta_t, self._causal_mask, pad_mask)
+            x, attn_weights = block(
+                x, delta_t, self._causal_mask, pad_mask
+                ,return_attention=return_attention
+            )
+            if return_attention and attn_weights is not None:
+                block_attn_weights.append(attn_weights)  # [B, N]
 
         x        = self._out_norm(x)
         idx      = (lengths - 1).clamp(0, N - 1).view(-1, 1, 1).expand(-1, 1, x.size(-1))
         seq_repr = x.gather(1, idx).squeeze(1)
 
-        return (
-            torch.sigmoid(self.head_30(seq_repr))
-            ,torch.sigmoid(self.head_60(seq_repr))
-            ,torch.sigmoid(self.head_180(seq_repr))
-        )
+        pred_30  = torch.sigmoid(self.head_30(seq_repr))
+        pred_60  = torch.sigmoid(self.head_60(seq_repr))
+        pred_180 = torch.sigmoid(self.head_180(seq_repr))
+
+        if return_attention:
+            # mean across blocks → [B, N] — one importance score per visit position
+            attn_agg = torch.stack(block_attn_weights, dim=0).mean(dim=0)  # [B, N]
+            # zero out padding positions
+            attn_agg = attn_agg.masked_fill(pad_mask, 0.0)
+            return pred_30, pred_60, pred_180, attn_agg
+
+        return pred_30, pred_60, pred_180
