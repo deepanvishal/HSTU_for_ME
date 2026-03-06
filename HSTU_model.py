@@ -64,8 +64,16 @@ print(f"Specialties: {NUM_SPECIALTIES}")
 # ============================================================
 # STEP 2: VISIT EMBEDDING FUNCTION
 # ============================================================
+def to_list(val):
+    if val is None:
+        return []
+    if isinstance(val, (list, np.ndarray)):
+        return list(val)
+    return []
+
 def get_visit_embedding(providers, specialties, dxs, procedures):
     def lookup(lst, matrix, vocab, unk):
+        lst = to_list(lst)
         if not lst:
             return unk
         vecs = [matrix[vocab[x]] if x in vocab else unk for x in lst]
@@ -76,7 +84,7 @@ def get_visit_embedding(providers, specialties, dxs, procedures):
     d  = lookup(dxs,         dx_matrix,        dx_vocab,        unk_emb['dx'])
     pr = lookup(procedures,  procedure_matrix, procedure_vocab, unk_emb['procedure'])
 
-    return np.concatenate([p, s, d, pr]).astype(np.float32)  # 128-dim
+    return np.concatenate([p, s, d, pr]).astype(np.float32)
 
 # ============================================================
 # STEP 3: LOAD DATA FROM BIGQUERY
