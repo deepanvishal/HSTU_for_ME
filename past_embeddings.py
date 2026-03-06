@@ -1,21 +1,22 @@
 # ============================================================
-# NOTEBOOK 1: BUILD GRAPHS + TRAIN EMBEDDINGS
+# NOTEBOOK 1: BUILD GRAPHS + TRAIN EMBEDDINGS (GPU)
 # ============================================================
 
 import os
 import pickle
 import itertools
 import numpy as np
-import networkx as nx
-import pandas as pd
-from node2vec import Node2Vec
-from multiprocessing import Pool
+import cudf
+import cugraph
+from cuml.feature_extraction.text import HashingVectorizer
+from gensim.models import Word2Vec
+from collections import defaultdict
 from google.cloud import bigquery
 
 os.makedirs('./embeddings', exist_ok=True)
 
 # ============================================================
-# STEP 1: STREAM DATA FROM BIGQUERY — NO FULL LOAD
+# STEP 1: STREAM DATA + BUILD EDGE DICTS
 # ============================================================
 client = bigquery.Client(project='anbc-hcb-dev')
 
@@ -34,101 +35,116 @@ FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit
 INNER JOIN random_sample r ON s.member_id = r.member_id
 """
 
-print("Streaming data and building edge lists...")
+provider_edges  = defaultdict(int)
+dx_edges        = defaultdict(int)
+specialty_edges = defaultdict(int)
+procedure_edges = defaultdict(int)
 
-provider_edges  = []
-specialty_edges = []
-dx_edges        = []
-procedure_edges = []
-
-def get_combinations(lst):
+def update_edges(edges, lst):
     if not lst or len(lst) < 2:
-        return []
-    return [tuple(sorted([str(a), str(b)])) for a, b in itertools.combinations(lst, 2)]
+        return
+    for a, b in itertools.combinations(lst, 2):
+        key = (min(str(a), str(b)), max(str(a), str(b)))
+        edges[key] += 1
 
-CHUNK_SIZE = 50_000
 rows_processed = 0
-
-job = client.query(sample_query)
-
-for page in job.result(page_size=CHUNK_SIZE).pages:
+for page in client.query(sample_query).result(page_size=50_000).pages:
     rows = list(page)
-    if not rows:
-        continue
-
     for row in rows:
-        provider_edges.extend(get_combinations(row.provider_ids   or []))
-        specialty_edges.extend(get_combinations(row.specialty_codes or []))
-        dx_edges.extend(get_combinations(row.dx_list             or []))
-        procedure_edges.extend(get_combinations(row.procedure_codes or []))
-
+        update_edges(provider_edges,  row.provider_ids    or [])
+        update_edges(specialty_edges, row.specialty_codes or [])
+        update_edges(dx_edges,        row.dx_list         or [])
+        update_edges(procedure_edges, row.procedure_codes or [])
     rows_processed += len(rows)
     print(f"Rows processed: {rows_processed:,}", end='\r')
 
-print(f"\nStreaming complete — {rows_processed:,} rows")
+print(f"\nEdge counting complete")
+print(f"Provider edges:  {len(provider_edges):,}")
+print(f"Specialty edges: {len(specialty_edges):,}")
+print(f"DX edges:        {len(dx_edges):,}")
+print(f"Procedure edges: {len(procedure_edges):,}")
 
 # ============================================================
-# STEP 2: COUNT EDGES USING PANDAS — VECTORIZED
+# STEP 2: BUILD cuGRAPH GRAPHS + RUN RANDOM WALKS
 # ============================================================
-def build_nx_graph(edge_list, name):
-    print(f"Building {name} graph...")
-    if not edge_list:
-        print(f"  No edges for {name}")
-        return nx.Graph()
+def build_cugraph_and_walk(edge_dict, name, walk_length=30, num_walks=100):
+    print(f"\nBuilding {name} graph on GPU...")
 
-    df = pd.DataFrame(edge_list, columns=['n1', 'n2'])
-    df = df.groupby(['n1', 'n2']).size().reset_index(name='weight')
+    # node index mapping
+    nodes = sorted(set(n for edge in edge_dict.keys() for n in edge))
+    node_vocab = {node: idx for idx, node in enumerate(nodes)}
 
-    G = nx.from_pandas_edgelist(df, 'n1', 'n2', edge_attr='weight')
-    del df
-    print(f"  {name} — nodes: {G.number_of_nodes():,}  edges: {G.number_of_edges():,}")
-    return G
+    src     = [node_vocab[e[0]] for e in edge_dict.keys()]
+    dst     = [node_vocab[e[1]] for e in edge_dict.keys()]
+    weights = list(edge_dict.values())
 
-G_provider  = build_nx_graph(provider_edges,  'provider');  del provider_edges
-G_specialty = build_nx_graph(specialty_edges, 'specialty'); del specialty_edges
-G_dx        = build_nx_graph(dx_edges,        'dx');        del dx_edges
-G_procedure = build_nx_graph(procedure_edges, 'procedure'); del procedure_edges
+    # build cuGraph
+    gdf = cudf.DataFrame({'src': src, 'dst': dst, 'weight': weights})
+    G   = cugraph.Graph()
+    G.from_cudf_edgelist(gdf, source='src', destination='dst', edge_attr='weight')
 
-# ============================================================
-# STEP 3: TRAIN NODE2VEC IN PARALLEL
-# ============================================================
-def train_and_save(args):
-    G, dim, name = args
-    print(f"Training {name} embeddings ({dim}-dim)...")
+    print(f"  {name} — nodes: {G.number_of_vertices():,}  edges: {G.number_of_edges():,}")
 
-    node2vec = Node2Vec(
-        G
-        ,dimensions  = dim
-        ,walk_length = 30
-        ,num_walks   = 100
-        ,workers     = 4
-        ,weight_key  = 'weight'
-        ,quiet       = True
+    # random walks on GPU
+    print(f"  Running random walks...")
+    start_vertices = cudf.Series(list(range(G.number_of_vertices())) * num_walks)
+    walks, _ = cugraph.node2vec(G, start_vertices, walk_length, use_padding=True)
+
+    # convert walks to sentences for Word2Vec
+    walks_np  = walks.to_pandas().values.reshape(-1, walk_length)
+    idx_to_node = {idx: node for node, idx in node_vocab.items()}
+    sentences = [
+        [idx_to_node[int(n)] for n in walk if n >= 0]
+        for walk in walks_np
+    ]
+
+    return sentences, node_vocab, nodes
+
+def train_word2vec_and_save(sentences, nodes, name, dim=32):
+    print(f"  Training Word2Vec for {name}...")
+    model = Word2Vec(
+        sentences
+        ,vector_size = dim
+        ,window      = 10
+        ,min_count   = 1
+        ,workers     = 8
+        ,epochs      = 5
     )
-    model = node2vec.fit(window=10, min_count=1, batch_words=4)
 
-    nodes  = model.wv.index_to_key
     vocab  = {node: idx for idx, node in enumerate(nodes)}
-    matrix = np.array([model.wv[node] for node in nodes], dtype=np.float32)
+    matrix = np.array(
+        [model.wv[node] if node in model.wv else np.zeros(dim) for node in nodes]
+        ,dtype=np.float32
+    )
 
     np.save(f'./embeddings/{name}_embeddings.npy', matrix)
     with open(f'./embeddings/{name}_vocab.pkl', 'wb') as f:
         pickle.dump(vocab, f)
 
     print(f"  {name} saved — vocab: {len(vocab):,}  shape: {matrix.shape}")
-    return name
 
-graph_configs = [
-    (G_provider,  32, 'provider')
-    ,(G_specialty, 32, 'specialty')
-    ,(G_dx,        32, 'dx')
-    ,(G_procedure, 32, 'procedure')
-]
-
-# node2vec uses workers internally so run sequentially
-# parallel here would cause resource contention
-for config in graph_configs:
-    train_and_save(config)
+# ============================================================
+# STEP 3: PROCESS ALL 4 GRAPHS
+# ============================================================
+for edge_dict, name, dim in [
+    (provider_edges,  'provider',  32)
+    ,(specialty_edges, 'specialty', 32)
+    ,(dx_edges,        'dx',        32)
+    ,(procedure_edges, 'procedure', 32)
+]:
+    sentences, node_vocab, nodes = build_cugraph_and_walk(edge_dict, name)
+    train_word2vec_and_save(sentences, nodes, name, dim)
+    del sentences
 
 print("\nAll embeddings saved to ./embeddings/")
 print("Notebook 1 complete")
+```
+
+---
+
+Run and share output. Expect:
+```
+Rows processed: ~2.6M
+Provider edges: X
+DX edges: X
+...
