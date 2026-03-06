@@ -1,11 +1,6 @@
 # ============================================================
 # NOTEBOOK 2: HSTU TRAINING
 # ============================================================
-# CHANGE SAMPLE_PCT TO SCALE:
-# 0.005 = 0.5% (~1 hour)
-# 0.10  = 10%  (~overnight)
-# 1.0   = 100% (~production)
-# ============================================================
 
 import os
 import sys
@@ -43,6 +38,18 @@ print(f"Device: {DEVICE}")
 print(f"Sample: {SAMPLE_PCT*100}%")
 
 # ============================================================
+# UTILITY
+# ============================================================
+def to_list(val):
+    if val is None:
+        return []
+    if isinstance(val, np.ndarray):
+        return [str(x) for x in val.tolist()]
+    if isinstance(val, list):
+        return [str(x) for x in val]
+    return []
+
+# ============================================================
 # STEP 1: LOAD EMBEDDINGS
 # ============================================================
 print("\nLoading embeddings...")
@@ -51,40 +58,36 @@ specialty_matrix = np.load('./embeddings/specialty_embeddings.npy')
 dx_matrix        = np.load('./embeddings/dx_embeddings.npy')
 procedure_matrix = np.load('./embeddings/procedure_embeddings.npy')
 
-with open('./embeddings/provider_vocab.pkl',  'rb') as f: provider_vocab  = pickle.load(f)
-with open('./embeddings/specialty_vocab.pkl', 'rb') as f: specialty_vocab = pickle.load(f)
-with open('./embeddings/dx_vocab.pkl',        'rb') as f: dx_vocab        = pickle.load(f)
-with open('./embeddings/procedure_vocab.pkl', 'rb') as f: procedure_vocab = pickle.load(f)
-with open('./embeddings/unk_embeddings.pkl',  'rb') as f: unk_emb         = pickle.load(f)
-with open('./embeddings/specialty_label_vocab.pkl', 'rb') as f: specialty_label_vocab = pickle.load(f)
+with open('./embeddings/provider_vocab.pkl',       'rb') as f: provider_vocab        = pickle.load(f)
+with open('./embeddings/specialty_vocab.pkl',      'rb') as f: specialty_vocab       = pickle.load(f)
+with open('./embeddings/dx_vocab.pkl',             'rb') as f: dx_vocab              = pickle.load(f)
+with open('./embeddings/procedure_vocab.pkl',      'rb') as f: procedure_vocab       = pickle.load(f)
+with open('./embeddings/unk_embeddings.pkl',       'rb') as f: unk_emb               = pickle.load(f)
+with open('./embeddings/specialty_label_vocab.pkl','rb') as f: specialty_label_vocab = pickle.load(f)
 
 NUM_SPECIALTIES = len(specialty_label_vocab)
 print(f"Specialties: {NUM_SPECIALTIES}")
+print(f"Provider vocab:  {len(provider_vocab):,}")
+print(f"DX vocab:        {len(dx_vocab):,}")
+print(f"Procedure vocab: {len(procedure_vocab):,}")
 
 # ============================================================
 # STEP 2: VISIT EMBEDDING FUNCTION
 # ============================================================
-def to_list(val):
-    if val is None:
-        return []
-    if isinstance(val, (list, np.ndarray)):
-        return list(val)
-    return []
-
 def get_visit_embedding(providers, specialties, dxs, procedures):
     def lookup(lst, matrix, vocab, unk):
         lst = to_list(lst)
         if not lst:
-            return unk
+            return unk.copy()
         vecs = [matrix[vocab[x]] if x in vocab else unk for x in lst]
-        return np.mean(vecs, axis=0)
+        return np.mean(vecs, axis=0).astype(np.float32)
 
     p  = lookup(providers,   provider_matrix,  provider_vocab,  unk_emb['provider'])
     s  = lookup(specialties, specialty_matrix, specialty_vocab, unk_emb['specialty'])
     d  = lookup(dxs,         dx_matrix,        dx_vocab,        unk_emb['dx'])
     pr = lookup(procedures,  procedure_matrix, procedure_vocab, unk_emb['procedure'])
 
-    return np.concatenate([p, s, d, pr]).astype(np.float32)
+    return np.concatenate([p, s, d, pr]).astype(np.float32)  # 128-dim
 
 # ============================================================
 # STEP 3: LOAD DATA FROM BIGQUERY
@@ -136,14 +139,15 @@ CHUNK_SIZE = 50_000
 
 df_seq = client.query(sequence_query).to_dataframe()
 print(f"Sequence rows: {len(df_seq):,}")
+
 for start in range(0, len(df_seq), CHUNK_SIZE):
     chunk = df_seq.iloc[start:start + CHUNK_SIZE]
     for row in chunk.itertuples():
         emb = get_visit_embedding(
-            row.provider_ids    or []
-            ,row.specialty_codes or []
-            ,row.dx_list         or []
-            ,row.procedure_codes or []
+            row.provider_ids
+            ,row.specialty_codes
+            ,row.dx_list
+            ,row.procedure_codes
         )
         member_sequences[row.member_id].append({
             'visit_seq_num'  : row.visit_seq_num
@@ -157,14 +161,15 @@ del df_seq
 print("Loading labels...")
 df_lab = client.query(label_query).to_dataframe()
 print(f"Label rows: {len(df_lab):,}")
+
 for start in range(0, len(df_lab), CHUNK_SIZE):
     chunk = df_lab.iloc[start:start + CHUNK_SIZE]
     for row in chunk.itertuples():
         member_labels[row.member_id].append({
             'visit_seq_num'   : row.visit_seq_num
-            ,'specialties_30' : list(row.specialties_30  or [])
-            ,'specialties_60' : list(row.specialties_60  or [])
-            ,'specialties_180': list(row.specialties_180 or [])
+            ,'specialties_30' : to_list(row.specialties_30)
+            ,'specialties_60' : to_list(row.specialties_60)
+            ,'specialties_180': to_list(row.specialties_180)
         })
     del chunk
 del df_lab
@@ -172,7 +177,7 @@ del df_lab
 print(f"Members loaded: {len(member_sequences):,}")
 
 # ============================================================
-# STEP 4: TRAIN / VAL / TEST SPLIT (TIME BASED PER MEMBER)
+# STEP 4: TRAIN / VAL / TEST SPLIT
 # ============================================================
 train_data = []
 val_data   = []
@@ -185,12 +190,11 @@ for member_id, visits in member_sequences.items():
 
     train_cut = int(n * 0.75)
     val_cut   = int(n * 0.875)
+    labels    = {l['visit_seq_num']: l for l in member_labels.get(member_id, [])}
 
-    labels = {l['visit_seq_num']: l for l in member_labels.get(member_id, [])}
-
-    train_data.append((member_id, visits[:train_cut],      labels))
-    val_data.append((member_id,   visits[:val_cut],        labels))
-    test_data.append((member_id,  visits[:int(n * 0.875)], labels))
+    train_data.append((member_id, visits[:train_cut],  labels))
+    val_data.append((member_id,   visits[:val_cut],    labels))
+    test_data.append((member_id,  visits[:val_cut],    labels))
 
 print(f"Train: {len(train_data):,}  Val: {len(val_data):,}  Test: {len(test_data):,}")
 
@@ -199,7 +203,7 @@ print(f"Train: {len(train_data):,}  Val: {len(val_data):,}  Test: {len(test_data
 # ============================================================
 def make_label_vector(specs):
     vec = np.zeros(NUM_SPECIALTIES, dtype=np.float32)
-    for s in (specs or []):
+    for s in to_list(specs):
         if s in specialty_label_vocab:
             vec[specialty_label_vocab[s]] = 1.0
     return vec
@@ -214,13 +218,11 @@ class VisitDataset(Dataset):
             embeddings = np.stack([v['embedding'] for v in visits])
             delta_t    = np.array([v['delta_t_bucket'] for v in visits], dtype=np.int64)
 
-            # pad
             pad = max_seq_len - n
             if pad > 0:
-                embeddings = np.vstack([embeddings, np.zeros((pad, EMBEDDING_DIM))])
+                embeddings = np.vstack([embeddings, np.zeros((pad, EMBEDDING_DIM), dtype=np.float32)])
                 delta_t    = np.concatenate([delta_t, np.zeros(pad, dtype=np.int64)])
 
-            # get label for last visit
             last_seq_num = visits[-1]['visit_seq_num']
             label        = labels.get(last_seq_num)
             if label is None:
@@ -271,13 +273,13 @@ class HSTUModel(nn.Module):
         )
 
         self.hstu = HSTU(
-            max_sequence_len  = MAX_SEQ_LEN
-            ,embedding_dim    = embedding_dim
-            ,num_blocks       = NUM_BLOCKS
-            ,num_heads        = NUM_HEADS
-            ,linear_dim       = LINEAR_DIM
-            ,attention_dim    = ATTENTION_DIM
-            ,dropout_rate     = DROPOUT_RATE
+            max_sequence_len = MAX_SEQ_LEN
+            ,embedding_dim   = embedding_dim
+            ,num_blocks      = NUM_BLOCKS
+            ,num_heads       = NUM_HEADS
+            ,linear_dim      = LINEAR_DIM
+            ,attention_dim   = ATTENTION_DIM
+            ,dropout_rate    = DROPOUT_RATE
         )
 
         self.head_30  = nn.Linear(embedding_dim, num_specialties)
@@ -288,17 +290,19 @@ class HSTUModel(nn.Module):
         B = embeddings.size(0)
 
         features = SequentialFeatures(
-            past_lengths    = lengths
-            ,past_ids       = torch.zeros(B, MAX_SEQ_LEN, dtype=torch.long).to(embeddings.device)
-            ,past_embeddings= embeddings
-            ,past_payloads  = {'ratings': delta_t, 'timestamps': torch.zeros_like(delta_t)}
+            past_lengths     = lengths
+            ,past_ids        = torch.zeros(B, MAX_SEQ_LEN, dtype=torch.long).to(embeddings.device)
+            ,past_embeddings = embeddings
+            ,past_payloads   = {
+                'ratings'   : delta_t
+                ,'timestamps': torch.zeros_like(delta_t)
+            }
         )
 
         x = self.input_preproc(features)
         x = self.hstu(x, features)
 
-        # gather last valid token
-        idx = (lengths - 1).clamp(0, MAX_SEQ_LEN - 1).view(-1, 1, 1).expand(-1, 1, x.size(-1))
+        idx      = (lengths - 1).clamp(0, MAX_SEQ_LEN - 1).view(-1, 1, 1).expand(-1, 1, x.size(-1))
         seq_repr = x.gather(1, idx).squeeze(1)
 
         return (
@@ -314,12 +318,12 @@ print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
 # STEP 7: METRICS
 # ============================================================
 def ndcg_at_k(pred, label, k):
-    top_k   = torch.topk(pred, k, dim=1).indices
-    gains   = label.gather(1, top_k)
+    top_k     = torch.topk(pred, k, dim=1).indices
+    gains     = label.gather(1, top_k).float()
     discounts = torch.log2(torch.arange(2, k + 2, dtype=torch.float32).to(pred.device))
-    dcg     = (gains / discounts).sum(dim=1)
-    ideal   = label.sum(dim=1).clamp(max=k)
-    idcg    = torch.zeros_like(dcg)
+    dcg       = (gains / discounts).sum(dim=1)
+    ideal     = label.sum(dim=1).clamp(max=k)
+    idcg      = torch.zeros_like(dcg)
     for i in range(1, k + 1):
         idcg += (ideal >= i).float() / np.log2(i + 1)
     return (dcg / idcg.clamp(min=1e-8)).mean().item()
@@ -330,9 +334,9 @@ def precision_at_k(pred, label, k):
     return (hits / k).mean().item()
 
 def recall_at_k(pred, label, k):
-    top_k    = torch.topk(pred, k, dim=1).indices
-    hits     = label.gather(1, top_k).sum(dim=1)
-    actual   = label.sum(dim=1).clamp(min=1)
+    top_k  = torch.topk(pred, k, dim=1).indices
+    hits   = label.gather(1, top_k).sum(dim=1)
+    actual = label.sum(dim=1).clamp(min=1)
     return (hits / actual).mean().item()
 
 def hit_rate_at_k(pred, label, k):
@@ -342,8 +346,7 @@ def hit_rate_at_k(pred, label, k):
 
 def evaluate(loader, model, k_list):
     model.eval()
-    metrics = defaultdict(lambda: defaultdict(float))
-    n_batches = 0
+    metrics   = defaultdict(list)
 
     with torch.no_grad():
         for batch in loader:
@@ -362,17 +365,12 @@ def evaluate(loader, model, k_list):
                     ,('T60',  pred_60,  label_60)
                     ,('T180', pred_180, label_180)
                 ]:
-                    metrics[f'{window}_ndcg@{k}'][n_batches]      = ndcg_at_k(pred, label, k)
-                    metrics[f'{window}_precision@{k}'][n_batches] = precision_at_k(pred, label, k)
-                    metrics[f'{window}_recall@{k}'][n_batches]    = recall_at_k(pred, label, k)
-                    metrics[f'{window}_hit@{k}'][n_batches]       = hit_rate_at_k(pred, label, k)
+                    metrics[f'{window}_ndcg@{k}'].append(ndcg_at_k(pred, label, k))
+                    metrics[f'{window}_prec@{k}'].append(precision_at_k(pred, label, k))
+                    metrics[f'{window}_rec@{k}'].append(recall_at_k(pred, label, k))
+                    metrics[f'{window}_hit@{k}'].append(hit_rate_at_k(pred, label, k))
 
-            n_batches += 1
-
-    return {
-        key: np.mean(list(vals.values()))
-        for key, vals in metrics.items()
-    }
+    return {key: np.mean(vals) for key, vals in metrics.items()}
 
 def print_metrics(metrics, split='Val'):
     print(f"\n{split} Metrics:")
@@ -380,19 +378,19 @@ def print_metrics(metrics, split='Val'):
         print(f"  {window}:")
         for k in EVAL_K:
             ndcg = metrics.get(f'{window}_ndcg@{k}', 0)
-            prec = metrics.get(f'{window}_precision@{k}', 0)
-            rec  = metrics.get(f'{window}_recall@{k}', 0)
-            hit  = metrics.get(f'{window}_hit@{k}', 0)
+            prec = metrics.get(f'{window}_prec@{k}', 0)
+            rec  = metrics.get(f'{window}_rec@{k}',  0)
+            hit  = metrics.get(f'{window}_hit@{k}',  0)
             print(f"    @{k:2d} — NDCG: {ndcg:.4f}  Prec: {prec:.4f}  Rec: {rec:.4f}  Hit: {hit:.4f}")
 
 # ============================================================
 # STEP 8: TRAINING LOOP
 # ============================================================
-optimizer   = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
-bce_loss    = nn.BCELoss()
-best_val    = float('inf')
-patience    = 5
-no_improve  = 0
+optimizer  = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
+bce_loss   = nn.BCELoss()
+best_val   = float('inf')
+patience   = 5
+no_improve = 0
 
 for epoch in range(EPOCHS):
     model.train()
@@ -422,8 +420,6 @@ for epoch in range(EPOCHS):
     train_loss /= len(train_loader)
 
     val_metrics = evaluate(val_loader, model, EVAL_K)
-    val_ndcg    = np.mean([val_metrics.get(f'T180_ndcg@{k}', 0) for k in EVAL_K])
-
     print(f"\nEpoch {epoch+1}/{EPOCHS} — Train Loss: {train_loss:.4f}")
     print_metrics(val_metrics, 'Val')
 
@@ -431,14 +427,14 @@ for epoch in range(EPOCHS):
         best_val   = train_loss
         no_improve = 0
         torch.save({
-            'epoch'                : epoch
-            ,'model_state_dict'    : model.state_dict()
-            ,'optimizer_state_dict': optimizer.state_dict()
+            'epoch'                 : epoch
+            ,'model_state_dict'     : model.state_dict()
+            ,'optimizer_state_dict' : optimizer.state_dict()
             ,'specialty_label_vocab': specialty_label_vocab
-            ,'best_val_loss'       : best_val
-            ,'embedding_dim'       : EMBEDDING_DIM
-            ,'num_specialties'     : NUM_SPECIALTIES
-            ,'eval_k'              : EVAL_K
+            ,'best_val_loss'        : best_val
+            ,'embedding_dim'        : EMBEDDING_DIM
+            ,'num_specialties'      : NUM_SPECIALTIES
+            ,'eval_k'               : EVAL_K
         }, './checkpoints/best_model.pt')
         print(f"  Model saved — loss: {best_val:.4f}")
     else:
