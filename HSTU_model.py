@@ -256,13 +256,22 @@ print(f"Train batches: {len(train_loader):,}  Val batches: {len(val_loader):,}  
 # ============================================================
 # STEP 6: MODEL
 # ============================================================
+import torch
+
+# monkey-patch fbgemm op
+def asynchronous_complete_cumsum(lengths):
+    zero = torch.zeros(1, dtype=lengths.dtype, device=lengths.device)
+    return torch.cat([zero, torch.cumsum(lengths, dim=0)])
+
+torch.ops.fbgemm.asynchronous_complete_cumsum = asynchronous_complete_cumsum
+
 from generative_recommenders.research.modeling.sequential.hstu import HSTU
 from generative_recommenders.research.modeling.sequential.embedding_modules import LocalEmbeddingModule
 from generative_recommenders.research.modeling.sequential.input_features_preprocessors import LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor
 from generative_recommenders.research.modeling.sequential.output_postprocessors import L2NormEmbeddingPostprocessor
 from generative_recommenders.research.rails.similarities.dot_product_similarity_fn import DotProductSimilarity
 
-HSTU_DIM = EMBEDDING_DIM + 32  # 128 + rating_embedding_dim
+HSTU_DIM = EMBEDDING_DIM + 32
 
 class HSTUModel(nn.Module):
     def __init__(self, embedding_dim, num_specialties):
