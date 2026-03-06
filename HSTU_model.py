@@ -272,113 +272,28 @@ test_loader   = DataLoader(test_dataset,  batch_size=BATCH_SIZE, shuffle=False, 
 print(f"Train batches: {len(train_loader):,}  Val: {len(val_loader):,}  Test: {len(test_loader):,}")
 
 # ============================================================
-# STEP 6: MODEL
+# STEP 6: MODEL — PURE PYTORCH HSTU
 # ============================================================
+import sys
+sys.path.insert(0, '.')  # ensure hstu_pytorch.py is importable
 
-# vectorized fbgemm patches
-def asynchronous_complete_cumsum(lengths):
-    zero = torch.zeros(1, dtype=lengths.dtype, device=lengths.device)
-    return torch.cat([zero, torch.cumsum(lengths, dim=0)])
+from hstu_pytorch import PureHSTU
 
-def dense_to_jagged(dense, offsets):
-    offsets  = offsets[0] if isinstance(offsets, list) else offsets
-    B, N, D  = dense.shape
-    lengths  = offsets[1:] - offsets[:-1]
-    mask     = torch.arange(N, device=dense.device).unsqueeze(0) < lengths.unsqueeze(1)
-    return dense[mask], offsets
+model = PureHSTU(
+    max_seq_len     = MAX_SEQ_LEN
+    ,embedding_dim  = EMBEDDING_DIM
+    ,num_blocks     = NUM_BLOCKS
+    ,num_heads      = NUM_HEADS
+    ,linear_dim     = LINEAR_DIM
+    ,attention_dim  = ATTENTION_DIM
+    ,dropout_rate   = DROPOUT_RATE
+    ,attn_dropout_rate = DROPOUT_RATE
+    ,num_ratings    = NUM_RATINGS
+    ,rating_dim     = RATING_DIM
+    ,num_specialties= NUM_SPECIALTIES
+).to(DEVICE)
 
-def jagged_to_padded_dense(values, offsets, max_lengths, padding_value=0.0):
-    offsets = offsets[0] if isinstance(offsets, list) else offsets
-    max_len = max_lengths[0] if isinstance(max_lengths, list) else max_lengths
-    B       = len(offsets) - 1
-    D       = values.size(-1)
-    out     = torch.full((B, max_len, D), padding_value, dtype=values.dtype, device=values.device)
-    for i in range(B):
-        start = int(offsets[i])
-        end   = int(offsets[i + 1])
-        n     = min(end - start, max_len)
-        out[i, :n] = values[start:start + n]
-    return out
-    
-torch.ops.fbgemm.asynchronous_complete_cumsum = asynchronous_complete_cumsum
-torch.ops.fbgemm.dense_to_jagged             = dense_to_jagged
-torch.ops.fbgemm.jagged_to_padded_dense      = jagged_to_padded_dense
-
-from generative_recommenders.research.modeling.sequential.hstu import HSTU
-from generative_recommenders.research.modeling.sequential.embedding_modules import LocalEmbeddingModule
-from generative_recommenders.research.modeling.sequential.input_features_preprocessors import LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor
-from generative_recommenders.research.modeling.sequential.output_postprocessors import L2NormEmbeddingPostprocessor
-from generative_recommenders.research.rails.similarities.dot_product_similarity_fn import DotProductSimilarity
-
-class HSTUModel(nn.Module):
-    def __init__(self, embedding_dim, num_specialties):
-        super().__init__()
-
-        self.hstu = HSTU(
-            max_sequence_len               = MAX_SEQ_LEN
-            ,max_output_len                = 1
-            ,embedding_dim                 = HSTU_DIM
-            ,num_blocks                    = NUM_BLOCKS
-            ,num_heads                     = NUM_HEADS
-            ,linear_dim                    = LINEAR_DIM
-            ,attention_dim                 = ATTENTION_DIM
-            ,normalization                 = 'rel_bias'
-            ,linear_config                 = 'uvqk'
-            ,linear_activation             = 'silu'
-            ,linear_dropout_rate           = DROPOUT_RATE
-            ,attn_dropout_rate             = DROPOUT_RATE
-            ,embedding_module              = LocalEmbeddingModule(
-                num_items           = 1
-                ,item_embedding_dim = embedding_dim
-            )
-            ,similarity_module             = DotProductSimilarity()
-            ,input_features_preproc_module = LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
-                max_sequence_len      = MAX_SEQ_LEN
-                ,item_embedding_dim   = embedding_dim
-                ,dropout_rate         = DROPOUT_RATE
-                ,rating_embedding_dim = RATING_DIM
-                ,num_ratings          = NUM_RATINGS
-            )
-            ,output_postproc_module        = L2NormEmbeddingPostprocessor(
-                embedding_dim = HSTU_DIM
-            )
-            ,verbose                       = False
-        )
-
-        self.head_30  = nn.Linear(HSTU_DIM, num_specialties)
-        self.head_60  = nn.Linear(HSTU_DIM, num_specialties)
-        self.head_180 = nn.Linear(HSTU_DIM, num_specialties)
-
-    def forward(self, embeddings, delta_t, lengths):
-        B      = embeddings.size(0)
-        device = embeddings.device
-
-        # vectorized valid mask — non-zero for valid positions
-        past_ids = (torch.arange(MAX_SEQ_LEN, device=device).unsqueeze(0) < lengths.unsqueeze(1)).long()
-        ratings  = delta_t.clamp(0, NUM_RATINGS - 1)
-
-        encoded  = self.hstu(
-            past_lengths     = lengths
-            ,past_ids        = past_ids
-            ,past_embeddings = embeddings
-            ,past_payloads   = {
-                'ratings'    : ratings
-                ,'timestamps': torch.zeros_like(ratings)
-            }
-        )
-
-        idx      = (lengths - 1).clamp(0, MAX_SEQ_LEN - 1).view(-1, 1, 1).expand(-1, 1, encoded.size(-1))
-        seq_repr = encoded.gather(1, idx).squeeze(1)
-
-        return (
-            torch.sigmoid(self.head_30(seq_repr))
-            ,torch.sigmoid(self.head_60(seq_repr))
-            ,torch.sigmoid(self.head_180(seq_repr))
-        )
-
-model = HSTUModel(EMBEDDING_DIM, NUM_SPECIALTIES).to(DEVICE)
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-
 # ============================================================
 # STEP 7: METRICS — VECTORIZED, FULL DATASET
 # ============================================================
