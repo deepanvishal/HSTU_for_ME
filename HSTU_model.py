@@ -462,4 +462,76 @@ for epoch in range(EPOCHS):
     model.train()
     train_loss = 0.0
 
-    for batch in train
+    for batch in train_loader:
+        embeddings = batch['embeddings'].to(DEVICE)
+        delta_t    = batch['delta_t'].to(DEVICE)
+        lengths    = batch['length'].to(DEVICE)
+        label_30   = batch['label_30'].to(DEVICE)
+        label_60   = batch['label_60'].to(DEVICE)
+        label_180  = batch['label_180'].to(DEVICE)
+
+        pred_30, pred_60, pred_180 = model(embeddings, delta_t, lengths)
+
+        loss = (
+            bce_loss(pred_30,  label_30)
+            + bce_loss(pred_60,  label_60)
+            + bce_loss(pred_180, label_180)
+        )
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        train_loss += loss.item()
+
+    scheduler.step()
+    train_loss  /= len(train_loader)
+    val_metrics  = evaluate(val_loader, model, EVAL_K)
+    val_ndcg     = np.mean([val_metrics.get(f'T180_ndcg@{k}', 0) for k in EVAL_K])
+
+    print(f"\nEpoch {epoch+1}/{EPOCHS} — Train Loss: {train_loss:.4f}  LR: {scheduler.get_last_lr()[0]:.6f}")
+    print_metrics(val_metrics, 'Val')
+
+    if val_ndcg > best_ndcg:
+        best_ndcg  = val_ndcg
+        no_improve = 0
+        torch.save({
+            'epoch'                 : epoch
+            ,'model_state_dict'     : model.state_dict()
+            ,'optimizer_state_dict' : optimizer.state_dict()
+            ,'scheduler_state_dict' : scheduler.state_dict()
+            ,'specialty_label_vocab': specialty_label_vocab
+            ,'best_val_ndcg'        : best_ndcg
+            ,'config': {
+                'embedding_dim' : EMBEDDING_DIM
+                ,'hstu_dim'     : HSTU_DIM
+                ,'num_specialties': NUM_SPECIALTIES
+                ,'max_seq_len'  : MAX_SEQ_LEN
+                ,'num_blocks'   : NUM_BLOCKS
+                ,'num_heads'    : NUM_HEADS
+                ,'linear_dim'   : LINEAR_DIM
+                ,'attention_dim': ATTENTION_DIM
+                ,'dropout_rate' : DROPOUT_RATE
+                ,'num_ratings'  : NUM_RATINGS
+                ,'rating_dim'   : RATING_DIM
+                ,'eval_k'       : EVAL_K
+            }
+        }, './checkpoints/best_model.pt')
+        print(f"  Model saved — val NDCG@T180: {best_ndcg:.4f}")
+    else:
+        no_improve += 1
+        if no_improve >= patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+
+# ============================================================
+# STEP 9: TEST EVALUATION
+# ============================================================
+print("\nLoading best model for test evaluation...")
+checkpoint = torch.load('./checkpoints/best_model.pt')
+model.load_state_dict(checkpoint['model_state_dict'])
+
+test_metrics = evaluate(test_loader, model, EVAL_K)
+print_metrics(test_metrics, 'Test')
+
+print("\nNotebook 2 complete")
