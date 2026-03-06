@@ -20,7 +20,30 @@ os.makedirs('./data',        exist_ok=True)
 # ============================================================
 # CONFIG
 # ============================================================
-SAMPLE_PCT    = 0.005
+TARGET      = 'specialty'   # 'specialty' | 'provider' | 'dx'
+SAMPLE_PCT  = 0.05
+
+# label columns per target
+LABEL_COLS = {
+    'specialty': ('specialties_30', 'specialties_60', 'specialties_180')
+    ,'provider' : ('providers_30',   'providers_60',   'providers_180')
+    ,'dx'       : ('dx_30',          'dx_60',          'dx_180')
+}
+
+LABEL_VOCAB_PATH = {
+    'specialty': './embeddings/specialty_label_vocab.pkl'
+    ,'provider' : './embeddings/provider_label_vocab.pkl'
+    ,'dx'       : './embeddings/dx_label_vocab.pkl'
+}
+
+assert TARGET in LABEL_COLS, f"TARGET must be one of {list(LABEL_COLS.keys())}"
+
+COL_30, COL_60, COL_180 = LABEL_COLS[TARGET]
+CHECKPOINT_PATH          = f'./checkpoints/best_model_{TARGET}_{int(SAMPLE_PCT*100)}pct.pt'
+SEQ_CACHE_PATH           = f'./data/member_sequences_{int(SAMPLE_PCT*100)}pct.pkl'
+LABEL_CACHE_PATH         = f'./data/member_labels_{TARGET}_{int(SAMPLE_PCT*100)}pct.pkl'
+LOAD_FROM_CACHE          = False
+
 MAX_SEQ_LEN   = 20
 BATCH_SIZE    = 512
 EPOCHS        = 5
@@ -39,13 +62,12 @@ DEVICE        = 'cuda' if torch.cuda.is_available() else 'cpu'
 NUM_GPUS      = torch.cuda.device_count()
 NUM_WORKERS   = min(4 * NUM_GPUS, 16)
 
-# set to True after first run to skip BQ + embedding lookup
-LOAD_FROM_CACHE = False
-
+print(f"Target:      {TARGET}")
+print(f"Sample:      {SAMPLE_PCT*100}%")
+print(f"Checkpoint:  {CHECKPOINT_PATH}")
 print(f"Device:      {DEVICE}")
 print(f"GPUs:        {NUM_GPUS}")
 print(f"Workers:     {NUM_WORKERS}")
-print(f"Sample:      {SAMPLE_PCT*100}%")
 print(f"Batch size:  {BATCH_SIZE}")
 print(f"Cache:       {LOAD_FROM_CACHE}")
 
@@ -70,15 +92,18 @@ specialty_matrix = np.load('./embeddings/specialty_embeddings.npy')
 dx_matrix        = np.load('./embeddings/dx_embeddings.npy')
 procedure_matrix = np.load('./embeddings/procedure_embeddings.npy')
 
-with open('./embeddings/provider_vocab.pkl',       'rb') as f: provider_vocab        = pickle.load(f)
-with open('./embeddings/specialty_vocab.pkl',      'rb') as f: specialty_vocab       = pickle.load(f)
-with open('./embeddings/dx_vocab.pkl',             'rb') as f: dx_vocab              = pickle.load(f)
-with open('./embeddings/procedure_vocab.pkl',      'rb') as f: procedure_vocab       = pickle.load(f)
-with open('./embeddings/unk_embeddings.pkl',       'rb') as f: unk_emb               = pickle.load(f)
-with open('./embeddings/specialty_label_vocab.pkl','rb') as f: specialty_label_vocab = pickle.load(f)
+with open('./embeddings/provider_vocab.pkl',  'rb') as f: provider_vocab  = pickle.load(f)
+with open('./embeddings/specialty_vocab.pkl', 'rb') as f: specialty_vocab = pickle.load(f)
+with open('./embeddings/dx_vocab.pkl',        'rb') as f: dx_vocab        = pickle.load(f)
+with open('./embeddings/procedure_vocab.pkl', 'rb') as f: procedure_vocab = pickle.load(f)
+with open('./embeddings/unk_embeddings.pkl',  'rb') as f: unk_emb         = pickle.load(f)
 
-NUM_SPECIALTIES = len(specialty_label_vocab)
-print(f"Specialties:     {NUM_SPECIALTIES}")
+with open(LABEL_VOCAB_PATH[TARGET], 'rb') as f:
+    label_vocab = pickle.load(f)
+
+NUM_CLASSES = len(label_vocab)
+print(f"Target:          {TARGET}")
+print(f"Label vocab:     {NUM_CLASSES:,}")
 print(f"Provider vocab:  {len(provider_vocab):,}")
 print(f"DX vocab:        {len(dx_vocab):,}")
 print(f"Procedure vocab: {len(procedure_vocab):,}")
@@ -101,14 +126,15 @@ def get_visit_embedding(providers, specialties, dxs, procedures):
     return np.concatenate([p, s, d, pr]).astype(np.float32)
 
 # ============================================================
-# STEP 3: LOAD DATA — FROM CACHE OR BIGQUERY
+# STEP 3: LOAD DATA
 # ============================================================
-if LOAD_FROM_CACHE and os.path.exists('./data/member_sequences.pkl') and os.path.exists('./data/member_labels.pkl'):
+seq_cached   = LOAD_FROM_CACHE and os.path.exists(SEQ_CACHE_PATH)
+label_cached = LOAD_FROM_CACHE and os.path.exists(LABEL_CACHE_PATH)
+
+if seq_cached and label_cached:
     print("\nLoading from cache...")
-    with open('./data/member_sequences.pkl', 'rb') as f:
-        member_sequences = pickle.load(f)
-    with open('./data/member_labels.pkl', 'rb') as f:
-        member_labels = pickle.load(f)
+    with open(SEQ_CACHE_PATH,   'rb') as f: member_sequences = pickle.load(f)
+    with open(LABEL_CACHE_PATH, 'rb') as f: member_labels    = pickle.load(f)
     print(f"Members loaded from cache: {len(member_sequences):,}")
 
 else:
@@ -143,13 +169,13 @@ else:
     ORDER BY s.member_id, s.visit_seq_num
     """
 
-    label_query = """
+    label_query = f"""
     SELECT
         l.member_id
         ,l.visit_seq_num
-        ,l.specialties_30
-        ,l.specialties_60
-        ,l.specialties_180
+        ,l.{COL_30}
+        ,l.{COL_60}
+        ,l.{COL_180}
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_label` l
     INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` m
         ON l.member_id = m.member_id
@@ -159,54 +185,59 @@ else:
     print("Loading sequences...")
     member_sequences = defaultdict(list)
     member_labels    = defaultdict(list)
+    CHUNK_SIZE       = 100_000
 
-    CHUNK_SIZE = 100_000
+    if not seq_cached:
+        df_seq = client.query(sequence_query).to_dataframe(create_bqstorage_client=True)
+        print(f"Sequence rows: {len(df_seq):,}")
 
-    df_seq = client.query(sequence_query).to_dataframe()
-    print(f"Sequence rows: {len(df_seq):,}")
+        for start in range(0, len(df_seq), CHUNK_SIZE):
+            chunk = df_seq.iloc[start:start + CHUNK_SIZE]
+            for row in chunk.itertuples():
+                emb = get_visit_embedding(
+                    row.provider_ids
+                    ,row.specialty_codes
+                    ,row.dx_list
+                    ,row.procedure_codes
+                )
+                member_sequences[row.member_id].append({
+                    'visit_seq_num'  : row.visit_seq_num
+                    ,'delta_t_bucket': int(min(row.delta_t_bucket, NUM_RATINGS - 1))
+                    ,'embedding'     : emb
+                })
+            del chunk
+        del df_seq
 
-    for start in range(0, len(df_seq), CHUNK_SIZE):
-        chunk = df_seq.iloc[start:start + CHUNK_SIZE]
-        for row in chunk.itertuples():
-            emb = get_visit_embedding(
-                row.provider_ids
-                ,row.specialty_codes
-                ,row.dx_list
-                ,row.procedure_codes
-            )
-            member_sequences[row.member_id].append({
-                'visit_seq_num'  : row.visit_seq_num
-                ,'delta_t_bucket': int(min(row.delta_t_bucket, NUM_RATINGS - 1))
-                ,'embedding'     : emb
-            })
-        del chunk
-    del df_seq
+        print("Saving sequence cache...")
+        with open(SEQ_CACHE_PATH, 'wb') as f:
+            pickle.dump(dict(member_sequences), f)
+    else:
+        print("Loading sequence cache...")
+        with open(SEQ_CACHE_PATH, 'rb') as f:
+            member_sequences = pickle.load(f)
 
     print("Loading labels...")
-    df_lab = client.query(label_query).to_dataframe()
+    df_lab = client.query(label_query).to_dataframe(create_bqstorage_client=True)
     print(f"Label rows: {len(df_lab):,}")
 
     for start in range(0, len(df_lab), CHUNK_SIZE):
         chunk = df_lab.iloc[start:start + CHUNK_SIZE]
         for row in chunk.itertuples():
             member_labels[row.member_id].append({
-                'visit_seq_num'   : row.visit_seq_num
-                ,'specialties_30' : to_list(row.specialties_30)
-                ,'specialties_60' : to_list(row.specialties_60)
-                ,'specialties_180': to_list(row.specialties_180)
+                'visit_seq_num': row.visit_seq_num
+                ,'label_30'    : to_list(getattr(row, COL_30))
+                ,'label_60'    : to_list(getattr(row, COL_60))
+                ,'label_180'   : to_list(getattr(row, COL_180))
             })
         del chunk
     del df_lab
 
-    print(f"Members loaded: {len(member_sequences):,}")
-
-    # save to cache for future runs
-    print("Saving to cache...")
-    with open('./data/member_sequences.pkl', 'wb') as f:
-        pickle.dump(dict(member_sequences), f)
-    with open('./data/member_labels.pkl', 'wb') as f:
+    print("Saving label cache...")
+    with open(LABEL_CACHE_PATH, 'wb') as f:
         pickle.dump(dict(member_labels), f)
-    print("Cache saved — set LOAD_FROM_CACHE=True for next run")
+    print(f"Cache saved — set LOAD_FROM_CACHE=True for next run")
+
+print(f"Members loaded: {len(member_sequences):,}")
 
 # ============================================================
 # STEP 4: TRAIN / VAL / TEST SPLIT
@@ -233,11 +264,11 @@ print(f"Train: {len(train_data):,}  Val: {len(val_data):,}  Test: {len(test_data
 # ============================================================
 # STEP 5: DATASET
 # ============================================================
-def make_label_vector(specs):
-    vec = np.zeros(NUM_SPECIALTIES, dtype=np.float32)
-    for s in to_list(specs):
-        if s in specialty_label_vocab:
-            vec[specialty_label_vocab[s]] = 1.0
+def make_label_vector(codes):
+    vec = np.zeros(NUM_CLASSES, dtype=np.float32)
+    for c in to_list(codes):
+        if c in label_vocab:
+            vec[label_vocab[c]] = 1.0
     return vec
 
 class VisitDataset(Dataset):
@@ -264,9 +295,9 @@ class VisitDataset(Dataset):
                 embeddings
                 ,delta_t
                 ,np.int64(n)
-                ,make_label_vector(label['specialties_30'])
-                ,make_label_vector(label['specialties_60'])
-                ,make_label_vector(label['specialties_180'])
+                ,make_label_vector(label['label_30'])
+                ,make_label_vector(label['label_60'])
+                ,make_label_vector(label['label_180'])
             ))
 
     def __len__(self):
@@ -322,7 +353,7 @@ model = PureHSTU(
     ,attn_dropout_rate = DROPOUT_RATE
     ,num_ratings       = NUM_RATINGS
     ,rating_dim        = RATING_DIM
-    ,num_specialties   = NUM_SPECIALTIES
+    ,num_specialties   = NUM_CLASSES
 )
 
 if NUM_GPUS > 1:
@@ -340,7 +371,7 @@ except Exception as e:
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 # ============================================================
-# STEP 7: METRICS — GPU ACCUMULATED
+# STEP 7: METRICS
 # ============================================================
 def ndcg_at_k(pred, label, k):
     top_k     = torch.topk(pred, k, dim=1).indices
@@ -368,8 +399,6 @@ def hit_rate_at_k(pred, label, k):
 
 def evaluate(loader, model, k_list):
     model.eval()
-
-    # accumulate scalars on GPU — no tensor list
     metric_sums = defaultdict(float)
     n_samples   = 0
 
@@ -389,7 +418,7 @@ def evaluate(loader, model, k_list):
             pred_60  = pred_60.float()
             pred_180 = pred_180.float()
 
-            B = embeddings.size(0)
+            B          = embeddings.size(0)
             n_samples += B
 
             for k in k_list:
@@ -406,7 +435,7 @@ def evaluate(loader, model, k_list):
     return {key: val / n_samples for key, val in metric_sums.items()}
 
 def print_metrics(metrics, split='Val'):
-    print(f"\n{split} Metrics:")
+    print(f"\n{split} Metrics [{TARGET}]:")
     for window in ['T30', 'T60', 'T180']:
         print(f"  {window}:")
         for k in EVAL_K:
@@ -477,28 +506,31 @@ for epoch in range(EPOCHS):
         best_ndcg  = val_ndcg
         no_improve = 0
         torch.save({
-            'epoch'                 : epoch
-            ,'model_state_dict'     : get_raw_model(model).state_dict()
-            ,'optimizer_state_dict' : optimizer.state_dict()
-            ,'scheduler_state_dict' : scheduler.state_dict()
-            ,'specialty_label_vocab': specialty_label_vocab
-            ,'best_val_ndcg'        : best_ndcg
+            'epoch'          : epoch
+            ,'model_state_dict'    : get_raw_model(model).state_dict()
+            ,'optimizer_state_dict': optimizer.state_dict()
+            ,'scheduler_state_dict': scheduler.state_dict()
+            ,'label_vocab'         : label_vocab
+            ,'best_val_ndcg'       : best_ndcg
+            ,'target'              : TARGET
             ,'config': {
-                'embedding_dim'   : EMBEDDING_DIM
-                ,'hstu_dim'       : HSTU_DIM
-                ,'num_specialties': NUM_SPECIALTIES
-                ,'max_seq_len'    : MAX_SEQ_LEN
-                ,'num_blocks'     : NUM_BLOCKS
-                ,'num_heads'      : NUM_HEADS
-                ,'linear_dim'     : LINEAR_DIM
-                ,'attention_dim'  : ATTENTION_DIM
-                ,'dropout_rate'   : DROPOUT_RATE
-                ,'num_ratings'    : NUM_RATINGS
-                ,'rating_dim'     : RATING_DIM
-                ,'eval_k'         : EVAL_K
+                'embedding_dim'  : EMBEDDING_DIM
+                ,'hstu_dim'      : HSTU_DIM
+                ,'num_classes'   : NUM_CLASSES
+                ,'max_seq_len'   : MAX_SEQ_LEN
+                ,'num_blocks'    : NUM_BLOCKS
+                ,'num_heads'     : NUM_HEADS
+                ,'linear_dim'    : LINEAR_DIM
+                ,'attention_dim' : ATTENTION_DIM
+                ,'dropout_rate'  : DROPOUT_RATE
+                ,'num_ratings'   : NUM_RATINGS
+                ,'rating_dim'    : RATING_DIM
+                ,'eval_k'        : EVAL_K
+                ,'sample_pct'    : SAMPLE_PCT
+                ,'target'        : TARGET
             }
-        }, './checkpoints/best_model.pt')
-        print(f"  Model saved — val NDCG@T180: {best_ndcg:.4f}")
+        }, CHECKPOINT_PATH)
+        print(f"  Saved → {CHECKPOINT_PATH}  val NDCG@T180: {best_ndcg:.4f}")
     else:
         no_improve += 1
         if no_improve >= patience:
@@ -508,8 +540,8 @@ for epoch in range(EPOCHS):
 # ============================================================
 # STEP 9: TEST EVALUATION
 # ============================================================
-print("\nLoading best model for test evaluation...")
-checkpoint = torch.load('./checkpoints/best_model.pt', weights_only=False)
+print(f"\nLoading best model: {CHECKPOINT_PATH}")
+checkpoint = torch.load(CHECKPOINT_PATH, weights_only=False)
 
 base_model = PureHSTU(
     max_seq_len        = MAX_SEQ_LEN
@@ -522,7 +554,7 @@ base_model = PureHSTU(
     ,attn_dropout_rate = DROPOUT_RATE
     ,num_ratings       = NUM_RATINGS
     ,rating_dim        = RATING_DIM
-    ,num_specialties   = NUM_SPECIALTIES
+    ,num_specialties   = NUM_CLASSES
 ).to(DEVICE)
 
 base_model.load_state_dict(checkpoint['model_state_dict'])
@@ -530,4 +562,4 @@ base_model.load_state_dict(checkpoint['model_state_dict'])
 test_metrics = evaluate(test_loader, base_model, EVAL_K)
 print_metrics(test_metrics, 'Test')
 
-print("\nNotebook 2 complete")
+print(f"\nNotebook 2 complete — target: {TARGET}  checkpoint: {CHECKPOINT_PATH}")
