@@ -1,150 +1,130 @@
 # ============================================================
-# NOTEBOOK 1: BUILD GRAPHS + TRAIN EMBEDDINGS (GPU)
+# NOTEBOOK 1: TRAIN EMBEDDINGS USING SPARSE SVD
 # ============================================================
 
 import os
 import pickle
-import itertools
 import numpy as np
-import cudf
-import cugraph
-from cuml.feature_extraction.text import HashingVectorizer
-from gensim.models import Word2Vec
-from collections import defaultdict
+import pandas as pd
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import svds
 from google.cloud import bigquery
 
 os.makedirs('./embeddings', exist_ok=True)
 
-# ============================================================
-# STEP 1: STREAM DATA + BUILD EDGE DICTS
-# ============================================================
 client = bigquery.Client(project='anbc-hcb-dev')
 
-sample_query = """
-WITH random_sample AS (
-    SELECT DISTINCT member_id
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence`
-    WHERE RAND() < 0.1
-)
-SELECT
-    s.provider_ids
-    ,s.specialty_codes
-    ,s.dx_list
-    ,s.procedure_codes
-FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence` s
-INNER JOIN random_sample r ON s.member_id = r.member_id
-"""
+# ============================================================
+# STEP 1: LOAD EDGE TABLES
+# ============================================================
+def load_edges(table, col1, col2):
+    df = client.query(f"""
+        SELECT {col1}, {col2}, weight
+        FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.{table}`
+    """).to_dataframe()
+    print(f"{table} — {len(df):,} edges")
+    return df
 
-provider_edges  = defaultdict(int)
-dx_edges        = defaultdict(int)
-specialty_edges = defaultdict(int)
-procedure_edges = defaultdict(int)
-
-def update_edges(edges, lst):
-    if not lst or len(lst) < 2:
-        return
-    for a, b in itertools.combinations(lst, 2):
-        key = (min(str(a), str(b)), max(str(a), str(b)))
-        edges[key] += 1
-
-rows_processed = 0
-for page in client.query(sample_query).result(page_size=50_000).pages:
-    rows = list(page)
-    for row in rows:
-        update_edges(provider_edges,  row.provider_ids    or [])
-        update_edges(specialty_edges, row.specialty_codes or [])
-        update_edges(dx_edges,        row.dx_list         or [])
-        update_edges(procedure_edges, row.procedure_codes or [])
-    rows_processed += len(rows)
-    print(f"Rows processed: {rows_processed:,}", end='\r')
-
-print(f"\nEdge counting complete")
-print(f"Provider edges:  {len(provider_edges):,}")
-print(f"Specialty edges: {len(specialty_edges):,}")
-print(f"DX edges:        {len(dx_edges):,}")
-print(f"Procedure edges: {len(procedure_edges):,}")
+df_provider  = load_edges('A870800_provider_edges',  'provider_1',  'provider_2')
+df_specialty = load_edges('A870800_specialty_edges', 'specialty_1', 'specialty_2')
+df_dx        = load_edges('A870800_dx_edges',        'dx_1',        'dx_2')
+df_procedure = load_edges('A870800_procedure_edges', 'procedure_1', 'procedure_2')
 
 # ============================================================
-# STEP 2: BUILD cuGRAPH GRAPHS + RUN RANDOM WALKS
+# STEP 2: SVD EMBEDDINGS
 # ============================================================
-def build_cugraph_and_walk(edge_dict, name, walk_length=30, num_walks=100):
-    print(f"\nBuilding {name} graph on GPU...")
+def svd_embeddings(df, col1, col2, dim, name):
+    print(f"\nTraining {name} embeddings ({dim}-dim via SVD)...")
 
-    # node index mapping
-    nodes = sorted(set(n for edge in edge_dict.keys() for n in edge))
-    node_vocab = {node: idx for idx, node in enumerate(nodes)}
+    # build node index
+    nodes = pd.unique(df[[col1, col2]].values.ravel())
+    vocab = {node: idx for idx, node in enumerate(nodes)}
+    n     = len(nodes)
 
-    src     = [node_vocab[e[0]] for e in edge_dict.keys()]
-    dst     = [node_vocab[e[1]] for e in edge_dict.keys()]
-    weights = list(edge_dict.values())
+    # build sparse adjacency matrix (symmetric)
+    row = [vocab[v] for v in df[col1]]
+    col = [vocab[v] for v in df[col2]]
+    dat = df['weight'].values.astype(np.float32)
 
-    # build cuGraph
-    gdf = cudf.DataFrame({'src': src, 'dst': dst, 'weight': weights})
-    G   = cugraph.Graph()
-    G.from_cudf_edgelist(gdf, source='src', destination='dst', edge_attr='weight')
+    # symmetric — add both directions
+    row_full = np.concatenate([row, col])
+    col_full = np.concatenate([col, row])
+    dat_full = np.concatenate([dat, dat])
 
-    print(f"  {name} — nodes: {G.number_of_vertices():,}  edges: {G.number_of_edges():,}")
+    A = csr_matrix((dat_full, (row_full, col_full)), shape=(n, n))
 
-    # random walks on GPU
-    print(f"  Running random walks...")
-    start_vertices = cudf.Series(list(range(G.number_of_vertices())) * num_walks)
-    walks, _ = cugraph.node2vec(G, start_vertices, walk_length, use_padding=True)
+    print(f"  {name} — nodes: {n:,}  sparse matrix: {A.nnz:,} entries")
 
-    # convert walks to sentences for Word2Vec
-    walks_np  = walks.to_pandas().values.reshape(-1, walk_length)
-    idx_to_node = {idx: node for node, idx in node_vocab.items()}
-    sentences = [
-        [idx_to_node[int(n)] for n in walk if n >= 0]
-        for walk in walks_np
-    ]
+    # SVD — k = embedding dim
+    k = min(dim, n - 1)
+    U, S, Vt = svds(A, k=k)
 
-    return sentences, node_vocab, nodes
+    # scale by singular values
+    matrix = (U * np.sqrt(S)).astype(np.float32)
 
-def train_word2vec_and_save(sentences, nodes, name, dim=32):
-    print(f"  Training Word2Vec for {name}...")
-    model = Word2Vec(
-        sentences
-        ,vector_size = dim
-        ,window      = 10
-        ,min_count   = 1
-        ,workers     = 8
-        ,epochs      = 5
-    )
-
-    vocab  = {node: idx for idx, node in enumerate(nodes)}
-    matrix = np.array(
-        [model.wv[node] if node in model.wv else np.zeros(dim) for node in nodes]
-        ,dtype=np.float32
-    )
-
+    # save
     np.save(f'./embeddings/{name}_embeddings.npy', matrix)
     with open(f'./embeddings/{name}_vocab.pkl', 'wb') as f:
         pickle.dump(vocab, f)
 
-    print(f"  {name} saved — vocab: {len(vocab):,}  shape: {matrix.shape}")
+    print(f"  saved — vocab: {len(vocab):,}  shape: {matrix.shape}")
+    return vocab, matrix
+
+provider_vocab,  provider_matrix  = svd_embeddings(df_provider,  'provider_1',  'provider_2',  32, 'provider');  del df_provider
+specialty_vocab, specialty_matrix = svd_embeddings(df_specialty, 'specialty_1', 'specialty_2', 32, 'specialty'); del df_specialty
+dx_vocab,        dx_matrix        = svd_embeddings(df_dx,        'dx_1',        'dx_2',        32, 'dx');        del df_dx
+procedure_vocab, procedure_matrix = svd_embeddings(df_procedure, 'procedure_1', 'procedure_2', 32, 'procedure'); del df_procedure
 
 # ============================================================
-# STEP 3: PROCESS ALL 4 GRAPHS
+# STEP 3: SAVE UNK EMBEDDINGS
 # ============================================================
-for edge_dict, name, dim in [
-    (provider_edges,  'provider',  32)
-    ,(specialty_edges, 'specialty', 32)
-    ,(dx_edges,        'dx',        32)
-    ,(procedure_edges, 'procedure', 32)
-]:
-    sentences, node_vocab, nodes = build_cugraph_and_walk(edge_dict, name)
-    train_word2vec_and_save(sentences, nodes, name, dim)
-    del sentences
+print("\nSaving UNK embeddings...")
+unk_embeddings = {
+    'provider'  : provider_matrix.mean(axis=0)
+    ,'specialty' : specialty_matrix.mean(axis=0)
+    ,'dx'        : dx_matrix.mean(axis=0)
+    ,'procedure' : procedure_matrix.mean(axis=0)
+}
+with open('./embeddings/unk_embeddings.pkl', 'wb') as f:
+    pickle.dump(unk_embeddings, f)
 
-print("\nAll embeddings saved to ./embeddings/")
-print("Notebook 1 complete")
-```
+print("UNK embeddings saved")
 
----
+# ============================================================
+# STEP 4: SAVE SPECIALTY LABEL VOCAB
+# ============================================================
+print("Saving specialty label vocab...")
+df_spec = client.query("""
+    SELECT specialty, idx
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_specialty_label_vocab`
+    ORDER BY idx
+""").to_dataframe()
 
-Run and share output. Expect:
-```
-Rows processed: ~2.6M
-Provider edges: X
-DX edges: X
-...
+specialty_label_vocab = dict(zip(df_spec['specialty'], df_spec['idx']))
+with open('./embeddings/specialty_label_vocab.pkl', 'wb') as f:
+    pickle.dump(specialty_label_vocab, f)
+
+print(f"Specialty label vocab — {len(specialty_label_vocab)} specialties")
+
+# ============================================================
+# STEP 5: VERIFY
+# ============================================================
+print("\nVerifying saved files...")
+files = [
+    './embeddings/provider_embeddings.npy'
+    ,'./embeddings/provider_vocab.pkl'
+    ,'./embeddings/specialty_embeddings.npy'
+    ,'./embeddings/specialty_vocab.pkl'
+    ,'./embeddings/dx_embeddings.npy'
+    ,'./embeddings/dx_vocab.pkl'
+    ,'./embeddings/procedure_embeddings.npy'
+    ,'./embeddings/procedure_vocab.pkl'
+    ,'./embeddings/unk_embeddings.pkl'
+    ,'./embeddings/specialty_label_vocab.pkl'
+]
+for f in files:
+    exists = os.path.exists(f)
+    size   = f"{os.path.getsize(f) / 1e6:.2f} MB" if exists else ""
+    print(f"  {'ok' if exists else 'MISSING'}  {f}  {size}")
+
+print("\nNotebook 1 complete")
