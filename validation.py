@@ -149,10 +149,11 @@ print(f"Test members: {len(test_data):,}")
 # ============================================================
 class TestDataset(Dataset):
     def __init__(self, data, max_seq_len):
-        self.samples    = []
-        self.member_ids = []
-        self.seq_lens   = []
-        self.actuals    = []
+        self.samples     = []
+        self.member_ids  = []
+        self.seq_lens    = []
+        self.actuals     = []
+        self.seq_nums    = []
 
         for member_id, visits, labels, full_len in data:
             visits = visits[-max_seq_len:]
@@ -181,6 +182,7 @@ class TestDataset(Dataset):
             ))
             self.member_ids.append(member_id)
             self.seq_lens.append(full_len)
+            self.seq_nums.append(last_seq_num)
             self.actuals.append({
                 'actual_30' : label['label_30']
                 ,'actual_60' : label['label_60']
@@ -438,6 +440,7 @@ for i, sample_idx in enumerate(all_indices.tolist()):
 
     pred_rows.append({
         'member_id'   : member_id
+        ,'visit_seq_num': test_dataset.seq_nums[sample_idx]
         ,'t30_pred'   : codes_30
         ,'t30_scores' : sc_30
         ,'t60_pred'   : codes_60
