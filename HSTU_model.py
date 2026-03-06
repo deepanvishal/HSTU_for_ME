@@ -427,6 +427,14 @@ best_ndcg  = 0.0
 patience   = 5
 no_improve = 0
 
+def get_raw_model(model):
+    raw = model
+    if hasattr(raw, '_orig_mod'):
+        raw = raw._orig_mod
+    if isinstance(raw, nn.DataParallel):
+        raw = raw.module
+    return raw
+
 for epoch in range(EPOCHS):
     model.train()
     train_loss = 0.0
@@ -465,14 +473,12 @@ for epoch in range(EPOCHS):
     print(f"\nEpoch {epoch+1}/{EPOCHS} — Train Loss: {train_loss:.4f}  LR: {scheduler.get_last_lr()[0]:.6f}")
     print_metrics(val_metrics, 'Val')
 
-    model_state = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
-
     if val_ndcg > best_ndcg:
         best_ndcg  = val_ndcg
         no_improve = 0
         torch.save({
             'epoch'                 : epoch
-            ,'model_state_dict'     : model_state
+            ,'model_state_dict'     : get_raw_model(model).state_dict()
             ,'optimizer_state_dict' : optimizer.state_dict()
             ,'scheduler_state_dict' : scheduler.state_dict()
             ,'specialty_label_vocab': specialty_label_vocab
@@ -503,7 +509,8 @@ for epoch in range(EPOCHS):
 # STEP 9: TEST EVALUATION
 # ============================================================
 print("\nLoading best model for test evaluation...")
-checkpoint = torch.load('./checkpoints/best_model.pt')
+checkpoint = torch.load('./checkpoints/best_model.pt', weights_only=False)
+
 base_model = PureHSTU(
     max_seq_len        = MAX_SEQ_LEN
     ,embedding_dim     = EMBEDDING_DIM
@@ -517,6 +524,7 @@ base_model = PureHSTU(
     ,rating_dim        = RATING_DIM
     ,num_specialties   = NUM_SPECIALTIES
 ).to(DEVICE)
+
 base_model.load_state_dict(checkpoint['model_state_dict'])
 
 test_metrics = evaluate(test_loader, base_model, EVAL_K)
