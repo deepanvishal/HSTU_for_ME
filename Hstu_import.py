@@ -226,3 +226,14 @@ result = subprocess.run(['cat',
    './generative-recommenders/generative_recommenders/research/modeling/sequential/features.py'], 
    capture_output=True, text=True)
 print(result.stdout)
+
+
+
+import subprocess
+
+for pkg in ['node2vec', 'gensim', 'networkx']:
+    result = subprocess.run(['pip', 'show', pkg], capture_output=True, text=True)
+    if result.returncode == 0:
+        print(f"{pkg} -- installed")
+    else:
+        print(f"{pkg} -- NOT installed")
