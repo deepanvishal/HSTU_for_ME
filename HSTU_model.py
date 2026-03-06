@@ -257,63 +257,80 @@ print(f"Train batches: {len(train_loader):,}  Val batches: {len(val_loader):,}  
 # STEP 6: MODEL
 # ============================================================
 from generative_recommenders.research.modeling.sequential.hstu import HSTU
+from generative_recommenders.research.modeling.sequential.embedding_modules import LocalEmbeddingModule
 from generative_recommenders.research.modeling.sequential.input_features_preprocessors import LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor
-from generative_recommenders.research.modeling.sequential.features import SequentialFeatures
+from generative_recommenders.research.modeling.sequential.output_postprocessors import L2NormEmbeddingPostprocessor
+from generative_recommenders.research.rails.similarities.dot_product_similarity_fn import DotProductSimilarity
 
 class HSTUModel(nn.Module):
     def __init__(self, embedding_dim, num_specialties):
         super().__init__()
 
-        self.input_preproc = LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
-            max_sequence_len      = MAX_SEQ_LEN
-            ,item_embedding_dim   = embedding_dim
-            ,dropout_rate         = DROPOUT_RATE
+        embedding_module = LocalEmbeddingModule(
+            num_items         = 1
+            ,item_embedding_dim = embedding_dim
+        )
+
+        input_preproc = LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
+            max_sequence_len    = MAX_SEQ_LEN
+            ,item_embedding_dim = embedding_dim
+            ,dropout_rate       = DROPOUT_RATE
             ,rating_embedding_dim = 32
-            ,num_ratings          = 10
+            ,num_ratings        = 10
+        )
+
+        output_postproc = L2NormEmbeddingPostprocessor(
+            embedding_dim = embedding_dim + 32  # item_dim + rating_dim
         )
 
         self.hstu = HSTU(
-            max_sequence_len = MAX_SEQ_LEN
-            ,embedding_dim   = embedding_dim
-            ,num_blocks      = NUM_BLOCKS
-            ,num_heads       = NUM_HEADS
-            ,linear_dim      = LINEAR_DIM
-            ,attention_dim   = ATTENTION_DIM
-            ,dropout_rate    = DROPOUT_RATE
+            max_sequence_len               = MAX_SEQ_LEN
+            ,max_output_len                = 1
+            ,embedding_dim                 = embedding_dim + 32
+            ,num_blocks                    = NUM_BLOCKS
+            ,num_heads                     = NUM_HEADS
+            ,linear_dim                    = LINEAR_DIM
+            ,attention_dim                 = ATTENTION_DIM
+            ,normalization                 = 'rel_bias'
+            ,linear_config                 = 'uvqk'
+            ,linear_activation             = 'silu'
+            ,linear_dropout_rate           = DROPOUT_RATE
+            ,attn_dropout_rate             = DROPOUT_RATE
+            ,embedding_module              = embedding_module
+            ,similarity_module             = DotProductSimilarity()
+            ,input_features_preproc_module = input_preproc
+            ,output_postproc_module        = output_postproc
+            ,verbose                       = False
         )
 
-        self.head_30  = nn.Linear(embedding_dim, num_specialties)
-        self.head_60  = nn.Linear(embedding_dim, num_specialties)
-        self.head_180 = nn.Linear(embedding_dim, num_specialties)
+        self.head_30  = nn.Linear(embedding_dim + 32, num_specialties)
+        self.head_60  = nn.Linear(embedding_dim + 32, num_specialties)
+        self.head_180 = nn.Linear(embedding_dim + 32, num_specialties)
+
+        self.register_buffer('dummy_ids', torch.zeros(1, MAX_SEQ_LEN, dtype=torch.long))
 
     def forward(self, embeddings, delta_t, lengths):
-        B = embeddings.size(0)
+        B        = embeddings.size(0)
+        past_ids = self.dummy_ids.expand(B, -1)
 
-        features = SequentialFeatures(
-            past_lengths     = lengths
-            ,past_ids        = torch.zeros(B, MAX_SEQ_LEN, dtype=torch.long).to(embeddings.device)
+        encoded  = self.hstu(
+            past_lengths    = lengths
+            ,past_ids       = past_ids
             ,past_embeddings = embeddings
-            ,past_payloads   = {
-                'ratings'   : delta_t
+            ,past_payloads  = {
+                'ratings'    : delta_t
                 ,'timestamps': torch.zeros_like(delta_t)
             }
         )
 
-        x = self.input_preproc(features)
-        x = self.hstu(x, features)
-
-        idx      = (lengths - 1).clamp(0, MAX_SEQ_LEN - 1).view(-1, 1, 1).expand(-1, 1, x.size(-1))
-        seq_repr = x.gather(1, idx).squeeze(1)
+        idx      = (lengths - 1).clamp(0, MAX_SEQ_LEN - 1).view(-1, 1, 1).expand(-1, 1, encoded.size(-1))
+        seq_repr = encoded.gather(1, idx).squeeze(1)
 
         return (
             torch.sigmoid(self.head_30(seq_repr))
             ,torch.sigmoid(self.head_60(seq_repr))
             ,torch.sigmoid(self.head_180(seq_repr))
         )
-
-model = HSTUModel(EMBEDDING_DIM, NUM_SPECIALTIES).to(DEVICE)
-print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
-
 # ============================================================
 # STEP 7: METRICS
 # ============================================================
