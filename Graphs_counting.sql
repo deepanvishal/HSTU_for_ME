@@ -106,3 +106,14 @@ SELECT
     ,COUNT(*) AS weight
 FROM exploded
 GROUP BY procedure_1, procedure_2
+
+
+SELECT
+    specialty_ctg_cd AS specialty
+    ,ROW_NUMBER() OVER (ORDER BY specialty_ctg_cd) - 1 AS idx
+FROM (
+    SELECT DISTINCT specialty_ctg_cd
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_2022_2025_sfl`
+    WHERE specialty_ctg_cd IS NOT NULL
+)
+ORDER BY specialty_ctg_cd
