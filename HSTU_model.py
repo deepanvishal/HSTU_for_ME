@@ -262,31 +262,16 @@ from generative_recommenders.research.modeling.sequential.input_features_preproc
 from generative_recommenders.research.modeling.sequential.output_postprocessors import L2NormEmbeddingPostprocessor
 from generative_recommenders.research.rails.similarities.dot_product_similarity_fn import DotProductSimilarity
 
+HSTU_DIM = EMBEDDING_DIM + 32  # 128 + rating_embedding_dim
+
 class HSTUModel(nn.Module):
     def __init__(self, embedding_dim, num_specialties):
         super().__init__()
 
-        embedding_module = LocalEmbeddingModule(
-            num_items         = 1
-            ,item_embedding_dim = embedding_dim
-        )
-
-        input_preproc = LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
-            max_sequence_len    = MAX_SEQ_LEN
-            ,item_embedding_dim = embedding_dim
-            ,dropout_rate       = DROPOUT_RATE
-            ,rating_embedding_dim = 32
-            ,num_ratings        = 10
-        )
-
-        output_postproc = L2NormEmbeddingPostprocessor(
-            embedding_dim = embedding_dim + 32  # item_dim + rating_dim
-        )
-
         self.hstu = HSTU(
             max_sequence_len               = MAX_SEQ_LEN
             ,max_output_len                = 1
-            ,embedding_dim                 = embedding_dim + 32
+            ,embedding_dim                 = HSTU_DIM
             ,num_blocks                    = NUM_BLOCKS
             ,num_heads                     = NUM_HEADS
             ,linear_dim                    = LINEAR_DIM
@@ -296,28 +281,38 @@ class HSTUModel(nn.Module):
             ,linear_activation             = 'silu'
             ,linear_dropout_rate           = DROPOUT_RATE
             ,attn_dropout_rate             = DROPOUT_RATE
-            ,embedding_module              = embedding_module
+            ,embedding_module              = LocalEmbeddingModule(
+                num_items          = 1
+                ,item_embedding_dim = embedding_dim
+            )
             ,similarity_module             = DotProductSimilarity()
-            ,input_features_preproc_module = input_preproc
-            ,output_postproc_module        = output_postproc
+            ,input_features_preproc_module = LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
+                max_sequence_len      = MAX_SEQ_LEN
+                ,item_embedding_dim   = embedding_dim
+                ,dropout_rate         = DROPOUT_RATE
+                ,rating_embedding_dim = 32
+                ,num_ratings          = 10
+            )
+            ,output_postproc_module        = L2NormEmbeddingPostprocessor(
+                embedding_dim = HSTU_DIM
+            )
             ,verbose                       = False
         )
 
-        self.head_30  = nn.Linear(embedding_dim + 32, num_specialties)
-        self.head_60  = nn.Linear(embedding_dim + 32, num_specialties)
-        self.head_180 = nn.Linear(embedding_dim + 32, num_specialties)
+        self.head_30  = nn.Linear(HSTU_DIM, num_specialties)
+        self.head_60  = nn.Linear(HSTU_DIM, num_specialties)
+        self.head_180 = nn.Linear(HSTU_DIM, num_specialties)
 
         self.register_buffer('dummy_ids', torch.zeros(1, MAX_SEQ_LEN, dtype=torch.long))
 
     def forward(self, embeddings, delta_t, lengths):
-        B        = embeddings.size(0)
-        past_ids = self.dummy_ids.expand(B, -1)
+        past_ids = self.dummy_ids.expand(embeddings.size(0), -1)
 
         encoded  = self.hstu(
-            past_lengths    = lengths
-            ,past_ids       = past_ids
+            past_lengths     = lengths
+            ,past_ids        = past_ids
             ,past_embeddings = embeddings
-            ,past_payloads  = {
+            ,past_payloads   = {
                 'ratings'    : delta_t
                 ,'timestamps': torch.zeros_like(delta_t)
             }
@@ -331,6 +326,9 @@ class HSTUModel(nn.Module):
             ,torch.sigmoid(self.head_60(seq_repr))
             ,torch.sigmoid(self.head_180(seq_repr))
         )
+
+model = HSTUModel(EMBEDDING_DIM, NUM_SPECIALTIES).to(DEVICE)
+print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 # ============================================================
 # STEP 7: METRICS
 # ============================================================
