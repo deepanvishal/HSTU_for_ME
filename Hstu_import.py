@@ -298,3 +298,8 @@ SELECT
     ,COUNTIF(member_count >= 100) AS common_dx_codes
     ,COUNT(*)                     AS total_dx_codes
 FROM dx_members
+
+
+
+
+!pip install cugraph-cu12 cuml-cu12 cudf-cu12 --extra-index-url https://pypi.nvidia.com
