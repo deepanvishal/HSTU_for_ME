@@ -26,11 +26,10 @@ SELECT
     ,specialty_codes
     ,dx_list
     ,procedure_codes
-    ,recency_rank
 FROM ranked_visits
-WHERE recency_rank <= 20
+WHERE recency_rank BETWEEN 2 AND 21  -- exclude rank 1 (last visit), take next 20
 ORDER BY member_id, visit_seq_num ASC
-
+;
 
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_inference_labels` AS
@@ -67,3 +66,4 @@ INNER JOIN (
 ) last
     ON  l.member_id     = last.member_id
     AND l.visit_seq_num = last.second_last_seq_num
+;
