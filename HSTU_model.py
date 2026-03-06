@@ -292,12 +292,14 @@ def jagged_to_padded_dense(values, offsets, max_lengths, padding_value=0.0):
     max_len = max_lengths[0] if isinstance(max_lengths, list) else max_lengths
     B       = len(offsets) - 1
     D       = values.size(-1)
-    lengths = offsets[1:] - offsets[:-1]
     out     = torch.full((B, max_len, D), padding_value, dtype=values.dtype, device=values.device)
-    mask    = torch.arange(max_len, device=values.device).unsqueeze(0) < lengths.unsqueeze(1)
-    out[mask] = values
+    for i in range(B):
+        start = int(offsets[i])
+        end   = int(offsets[i + 1])
+        n     = min(end - start, max_len)
+        out[i, :n] = values[start:start + n]
     return out
-
+    
 torch.ops.fbgemm.asynchronous_complete_cumsum = asynchronous_complete_cumsum
 torch.ops.fbgemm.dense_to_jagged             = dense_to_jagged
 torch.ops.fbgemm.jagged_to_padded_dense      = jagged_to_padded_dense
