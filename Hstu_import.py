@@ -303,3 +303,38 @@ FROM dx_members
 
 
 !pip install cugraph-cu12 cuml-cu12 cudf-cu12 --extra-index-url https://pypi.nvidia.com
+
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` AS
+SELECT DISTINCT member_id
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence`
+WHERE RAND() < 0.005
+
+
+sequence_query = """
+SELECT
+    s.member_id
+    ,s.visit_seq_num
+    ,s.visit_date
+    ,s.delta_t_bucket
+    ,s.provider_ids
+    ,s.specialty_codes
+    ,s.dx_list
+    ,s.procedure_codes
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence` s
+INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` m 
+    ON s.member_id = m.member_id
+ORDER BY s.member_id, s.visit_seq_num
+"""
+
+label_query = """
+SELECT
+    l.member_id
+    ,l.visit_seq_num
+    ,l.specialties_30
+    ,l.specialties_60
+    ,l.specialties_180
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_label` l
+INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` m 
+    ON l.member_id = m.member_id
+ORDER BY l.member_id, l.visit_seq_num
+"""
