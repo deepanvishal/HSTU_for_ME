@@ -257,13 +257,38 @@ print(f"Train batches: {len(train_loader):,}  Val batches: {len(val_loader):,}  
 # STEP 6: MODEL
 # ============================================================
 import torch
+import torch.nn as nn
 
-# monkey-patch fbgemm op
+# patch all fbgemm ops used by HSTU
 def asynchronous_complete_cumsum(lengths):
     zero = torch.zeros(1, dtype=lengths.dtype, device=lengths.device)
     return torch.cat([zero, torch.cumsum(lengths, dim=0)])
 
+def dense_to_jagged(dense, offsets):
+    # dense: [B, N, D] → jagged: [sum_N, D]
+    results = []
+    for i in range(dense.size(0)):
+        n = int(offsets[0][i+1] - offsets[0][i]) if isinstance(offsets, list) else int(offsets[i+1] - offsets[i])
+        results.append(dense[i, :n])
+    return torch.cat(results, dim=0), offsets
+
+def jagged_to_padded_dense(jagged, offsets, max_lengths, padding_value=0.0):
+    # jagged: [sum_N, D] → dense: [B, N, D]
+    offsets = offsets[0] if isinstance(offsets, list) else offsets
+    max_len = max_lengths[0] if isinstance(max_lengths, list) else max_lengths
+    B       = len(offsets) - 1
+    D       = jagged.size(-1)
+    out     = torch.full((B, max_len, D), padding_value, dtype=jagged.dtype, device=jagged.device)
+    for i in range(B):
+        start = int(offsets[i])
+        end   = int(offsets[i+1])
+        n     = min(end - start, max_len)
+        out[i, :n] = jagged[start:start+n]
+    return out
+
 torch.ops.fbgemm.asynchronous_complete_cumsum = asynchronous_complete_cumsum
+torch.ops.fbgemm.dense_to_jagged             = dense_to_jagged
+torch.ops.fbgemm.jagged_to_padded_dense      = jagged_to_padded_dense
 
 from generative_recommenders.research.modeling.sequential.hstu import HSTU
 from generative_recommenders.research.modeling.sequential.embedding_modules import LocalEmbeddingModule
@@ -291,7 +316,7 @@ class HSTUModel(nn.Module):
             ,linear_dropout_rate           = DROPOUT_RATE
             ,attn_dropout_rate             = DROPOUT_RATE
             ,embedding_module              = LocalEmbeddingModule(
-                num_items          = 1
+                num_items           = 1
                 ,item_embedding_dim = embedding_dim
             )
             ,similarity_module             = DotProductSimilarity()
@@ -338,6 +363,7 @@ class HSTUModel(nn.Module):
 
 model = HSTUModel(EMBEDDING_DIM, NUM_SPECIALTIES).to(DEVICE)
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+
 # ============================================================
 # STEP 7: METRICS
 # ============================================================
