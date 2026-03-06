@@ -8,7 +8,6 @@ import pickle
 import numpy as np
 import torch
 import torch.nn as nn
-import multiprocessing as mp
 from torch.utils.data import Dataset, DataLoader
 from collections import defaultdict
 from google.cloud import bigquery
@@ -61,7 +60,6 @@ EVAL_K        = [3, 5, 10]
 DEVICE        = 'cuda' if torch.cuda.is_available() else 'cpu'
 NUM_GPUS      = torch.cuda.device_count()
 NUM_WORKERS   = min(4 * NUM_GPUS, 16)
-NUM_PROC      = min(48, os.cpu_count() or 1)  # parallel workers for embedding build
 
 print(f"Target:      {TARGET}")
 print(f"Sample:      {SAMPLE_PCT*100}%")
@@ -71,7 +69,6 @@ print(f"GPUs:        {NUM_GPUS}")
 print(f"Workers:     {NUM_WORKERS}")
 print(f"Batch size:  {BATCH_SIZE}")
 print(f"Cache:       {LOAD_FROM_CACHE}")
-print(f"Embed procs: {NUM_PROC}")
 
 # ============================================================
 # UTILITY
@@ -153,12 +150,6 @@ def build_embeddings_vectorized(df):
     return np.concatenate([p_emb, s_emb, d_emb, pr_emb], axis=1).astype(np.float32)
 
 
-# worker function — inherits globals via fork (Linux)
-def _worker_embed_chunk(args):
-    chunk_df, chunk_start = args
-    embs = build_embeddings_vectorized(chunk_df)
-    return chunk_start, embs
-
 
 # ============================================================
 # STEP 3: LOAD DATA
@@ -225,22 +216,8 @@ else:
         df_seq = client.query(sequence_query).to_dataframe(create_bqstorage_client=True)
         print(f"Sequence rows: {len(df_seq):,}")
 
-        # split into NUM_PROC chunks for parallel embedding build
-        chunk_size = max(1, len(df_seq) // NUM_PROC)
-        chunks     = [
-            (df_seq.iloc[i:i + chunk_size].reset_index(drop=True), i)
-            for i in range(0, len(df_seq), chunk_size)
-        ]
-        print(f"Building embeddings — {NUM_PROC} parallel workers, {len(chunks)} chunks...")
-
-        # preallocate output array
-        all_embeddings = np.empty((len(df_seq), EMBEDDING_DIM), dtype=np.float32)
-
-        with mp.Pool(processes=NUM_PROC) as pool:
-            for chunk_start, embs in pool.imap_unordered(_worker_embed_chunk, chunks):
-                end = chunk_start + len(embs)
-                all_embeddings[chunk_start:end] = embs
-
+        print("Building embeddings (vectorized)...")
+        all_embeddings = build_embeddings_vectorized(df_seq)
         print("Embedding build complete — building member sequences...")
 
         # assign embeddings back and build member dict — pure numpy/pandas, no embedding work
