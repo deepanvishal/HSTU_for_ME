@@ -280,3 +280,21 @@ SELECT
 FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence` s
 INNER JOIN sampled_members m ON s.member_id = m.member_id
 ORDER BY s.member_id, s.visit_seq_num
+
+
+
+
+WITH dx_members AS (
+    SELECT
+        dx_code
+        ,COUNT(DISTINCT member_id) AS member_count
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence`
+    CROSS JOIN UNNEST(dx_list) AS dx_code
+    GROUP BY dx_code
+)
+
+SELECT
+    COUNTIF(member_count < 100)  AS rare_dx_codes
+    ,COUNTIF(member_count >= 100) AS common_dx_codes
+    ,COUNT(*)                     AS total_dx_codes
+FROM dx_members
