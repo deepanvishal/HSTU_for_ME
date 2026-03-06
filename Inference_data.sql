@@ -41,11 +41,29 @@ SELECT
     ,l.specialties_30
     ,l.specialties_60
     ,l.specialties_180
+    ,l.providers_30
+    ,l.providers_60
+    ,l.providers_180
+    ,l.dx_30
+    ,l.dx_60
+    ,l.dx_180
 FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_label` l
 INNER JOIN (
-    SELECT member_id, MAX(visit_seq_num) AS last_seq_num
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence`
+    SELECT
+        member_id
+        ,MAX(visit_seq_num) AS second_last_seq_num
+    FROM (
+        SELECT
+            member_id
+            ,visit_seq_num
+            ,ROW_NUMBER() OVER (
+                PARTITION BY member_id
+                ORDER BY visit_seq_num DESC
+            ) AS rn
+        FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence`
+    )
+    WHERE rn = 2
     GROUP BY member_id
 ) last
-    ON  l.member_id    = last.member_id
-    AND l.visit_seq_num = last.last_seq_num
+    ON  l.member_id     = last.member_id
+    AND l.visit_seq_num = last.second_last_seq_num
