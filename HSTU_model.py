@@ -109,46 +109,6 @@ print(f"\nLabel vocab: {NUM_CLASSES:,}  Provider vocab: {len(provider_vocab):,} 
 print(f"Step 1 done — {time.time() - t0:.1f}s")
 
 # ============================================================
-# STEP 2: VECTORIZED EMBEDDING BUILD
-# Per modality: scatter-add all codes per row into output matrix,
-# divide by count, fill unknowns with unk vector.
-# No per-row Python loop — all work is in numpy C layer.
-# ============================================================
-t0 = time.time()
-
-def _embed_column_vectorized(series, matrix, vocab, unk_vec):
-    n_rows = len(series)
-    dim    = matrix.shape[1]
-    result = np.zeros((n_rows, dim), dtype=np.float32)
-    counts = np.zeros(n_rows,       dtype=np.int32)
-
-    for row_idx, codes in enumerate(series):
-        if codes is None:
-            continue
-        if not isinstance(codes, (list, np.ndarray)):
-            codes = [codes]
-        indices = [vocab[str(c)] for c in codes if str(c) in vocab]
-        if not indices:
-            continue
-        np.add.at(result, row_idx, matrix[indices].sum(axis=0))
-        counts[row_idx] += len(indices)
-
-    mask          = counts > 0
-    result[mask]  /= counts[mask, np.newaxis]
-    result[~mask]  = unk_vec
-    return result
-
-
-def build_embeddings_vectorized(df):
-    p_emb  = _embed_column_vectorized(df['provider_ids'],    provider_matrix,  provider_vocab,  unk_emb['provider'])
-    s_emb  = _embed_column_vectorized(df['specialty_codes'], specialty_matrix, specialty_vocab, unk_emb['specialty'])
-    d_emb  = _embed_column_vectorized(df['dx_list'],         dx_matrix,        dx_vocab,        unk_emb['dx'])
-    pr_emb = _embed_column_vectorized(df['procedure_codes'], procedure_matrix, procedure_vocab, unk_emb['procedure'])
-    return np.concatenate([p_emb, s_emb, d_emb, pr_emb], axis=1).astype(np.float32)
-
-print(f"Step 2 done — {time.time() - t0:.1f}s")
-
-# ============================================================
 # STEP 3: LOAD DATA
 #
 # Design:
@@ -168,8 +128,6 @@ label_cached = LOAD_FROM_CACHE and os.path.exists(LABEL_CACHE_PATH)
 
 if not seq_cached or not label_cached:
     client = bigquery.Client(project='anbc-hcb-dev')
-
-if not seq_cached:
     print("\nSampling members in BigQuery...")
     client.query(f"""
         CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` AS
@@ -184,63 +142,96 @@ if not seq_cached:
     """).to_dataframe().iloc[0]['n']
     print(f"Sampled members: {member_count:,}")
 
-    print("Loading sequences from BQ...")
-    df_seq = client.query("""
+    # single BQ query — UNNEST + JOIN embedding tables + AVG per modality per visit
+    # + LEFT JOIN labels — one round trip, no Python embedding work
+    print("Running combined embedding + label query in BQ...")
+    pe  = ', '.join([f'AVG(pe.e{i})  AS pe{i}'  for i in range(32)])
+    se  = ', '.join([f'AVG(se.e{i})  AS se{i}'  for i in range(32)])
+    de  = ', '.join([f'AVG(de.e{i})  AS de{i}'  for i in range(32)])
+    pre = ', '.join([f'AVG(pre.e{i}) AS pre{i}' for i in range(32)])
+    cpe  = ', '.join([f'COALESCE(pa.pe{i},  0.0) AS pe{i}'  for i in range(32)])
+    cse  = ', '.join([f'COALESCE(sa.se{i},  0.0) AS se{i}'  for i in range(32)])
+    cde  = ', '.join([f'COALESCE(da.de{i},  0.0) AS de{i}'  for i in range(32)])
+    cpre = ', '.join([f'COALESCE(pra.pre{i}, 0.0) AS pre{i}' for i in range(32)])
+    DS   = 'anbc-hcb-dev.provider_ds_netconf_data_hcb_dev'
+
+    df_combined = client.query(f"""
+        WITH sampled AS (
+            SELECT member_id FROM `{DS}.A870800_sampled_members`
+        )
+        ,provider_agg AS (
+            SELECT s.member_id, s.visit_seq_num, {pe}
+            FROM `{DS}.A870800_claims_gen_rec_visit_sequence` s
+            INNER JOIN sampled m ON s.member_id = m.member_id
+            LEFT JOIN UNNEST(s.provider_ids) AS pid
+            LEFT JOIN `{DS}.A870800_provider_embeddings_bq` pe ON CAST(pid AS STRING) = pe.code
+            GROUP BY s.member_id, s.visit_seq_num
+        )
+        ,specialty_agg AS (
+            SELECT s.member_id, s.visit_seq_num, {se}
+            FROM `{DS}.A870800_claims_gen_rec_visit_sequence` s
+            INNER JOIN sampled m ON s.member_id = m.member_id
+            LEFT JOIN UNNEST(s.specialty_codes) AS spid
+            LEFT JOIN `{DS}.A870800_specialty_embeddings_bq` se ON CAST(spid AS STRING) = se.code
+            GROUP BY s.member_id, s.visit_seq_num
+        )
+        ,dx_agg AS (
+            SELECT s.member_id, s.visit_seq_num, {de}
+            FROM `{DS}.A870800_claims_gen_rec_visit_sequence` s
+            INNER JOIN sampled m ON s.member_id = m.member_id
+            LEFT JOIN UNNEST(s.dx_list) AS dxid
+            LEFT JOIN `{DS}.A870800_dx_embeddings_bq` de ON CAST(dxid AS STRING) = de.code
+            GROUP BY s.member_id, s.visit_seq_num
+        )
+        ,procedure_agg AS (
+            SELECT s.member_id, s.visit_seq_num, {pre}
+            FROM `{DS}.A870800_claims_gen_rec_visit_sequence` s
+            INNER JOIN sampled m ON s.member_id = m.member_id
+            LEFT JOIN UNNEST(s.procedure_codes) AS prid
+            LEFT JOIN `{DS}.A870800_procedure_embeddings_bq` pre ON CAST(prid AS STRING) = pre.code
+            GROUP BY s.member_id, s.visit_seq_num
+        )
         SELECT
             s.member_id
             ,s.visit_seq_num
-            ,s.delta_t_bucket
-            ,s.provider_ids
-            ,s.specialty_codes
-            ,s.dx_list
-            ,s.procedure_codes
-        FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence` s
-        INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` m
-            ON s.member_id = m.member_id
-        ORDER BY s.member_id, s.visit_seq_num
-    """).to_dataframe(create_bqstorage_client=True)
-    print(f"Sequence rows: {len(df_seq):,}")
-
-    print("Building embeddings (vectorized)...")
-    all_embeddings = build_embeddings_vectorized(df_seq)     # [N, 128] float32
-    print(f"Embeddings shape: {all_embeddings.shape}")
-
-    # build metadata — pure pandas, no loops
-    # visit_idx = original row position = index into all_embeddings
-    df_meta = pd.DataFrame({
-        'member_id'    : df_seq['member_id'].values
-        ,'visit_seq_num': df_seq['visit_seq_num'].values.astype(np.int32)
-        ,'dt_bucket'    : df_seq['delta_t_bucket'].values.clip(0, NUM_RATINGS - 1).astype(np.int8)
-        ,'visit_idx'    : np.arange(len(df_seq), dtype=np.int32)
-    })
-    del df_seq
-
-    np.save(SEQ_EMB_PATH, all_embeddings)
-    df_meta.to_parquet(SEQ_META_PATH, index=False)
-    del all_embeddings, df_meta
-    print(f"Sequence cache saved → {SEQ_EMB_PATH}, {SEQ_META_PATH}")
-
-if not label_cached:
-    print("Loading labels from BQ...")
-    df_lab = client.query(f"""
-        SELECT
-            l.member_id
-            ,l.visit_seq_num
+            ,LEAST(s.delta_t_bucket, {NUM_RATINGS - 1}) AS dt_bucket
+            ,{cpe}
+            ,{cse}
+            ,{cde}
+            ,{cpre}
             ,l.{COL_30}
             ,l.{COL_60}
             ,l.{COL_180}
-        FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_label` l
-        INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` m
-            ON l.member_id = m.member_id
-        ORDER BY l.member_id, l.visit_seq_num
+        FROM `{DS}.A870800_claims_gen_rec_visit_sequence` s
+        INNER JOIN sampled m       ON s.member_id = m.member_id
+        LEFT JOIN provider_agg  pa  ON s.member_id = pa.member_id  AND s.visit_seq_num = pa.visit_seq_num
+        LEFT JOIN specialty_agg sa  ON s.member_id = sa.member_id  AND s.visit_seq_num = sa.visit_seq_num
+        LEFT JOIN dx_agg        da  ON s.member_id = da.member_id  AND s.visit_seq_num = da.visit_seq_num
+        LEFT JOIN procedure_agg pra ON s.member_id = pra.member_id AND s.visit_seq_num = pra.visit_seq_num
+        LEFT JOIN `{DS}.A870800_claims_gen_rec_label` l
+            ON s.member_id = l.member_id AND s.visit_seq_num = l.visit_seq_num
+        ORDER BY s.member_id, s.visit_seq_num
     """).to_dataframe(create_bqstorage_client=True)
-    print(f"Label rows: {len(df_lab):,}")
 
-    df_lab[['member_id', 'visit_seq_num', COL_30, COL_60, COL_180]].to_parquet(
-        LABEL_CACHE_PATH, index=False
-    )
-    del df_lab
-    print(f"Label cache saved → {LABEL_CACHE_PATH}")
+    print(f"Combined query rows: {len(df_combined):,}")
+
+    emb_cols       = [f'pe{i}' for i in range(32)] + [f'se{i}' for i in range(32)] + [f'de{i}' for i in range(32)] + [f'pre{i}' for i in range(32)]
+    all_embeddings = df_combined[emb_cols].values.astype(np.float32)
+
+    df_meta = pd.DataFrame({
+        'member_id'     : df_combined['member_id'].values
+        ,'visit_seq_num': df_combined['visit_seq_num'].values.astype(np.int32)
+        ,'dt_bucket'    : df_combined['dt_bucket'].values.astype(np.int8)
+        ,'visit_idx'    : np.arange(len(df_combined), dtype=np.int32)
+    })
+    df_labels = df_combined[['member_id', 'visit_seq_num', COL_30, COL_60, COL_180]].copy()
+    del df_combined
+
+    np.save(SEQ_EMB_PATH, all_embeddings)
+    df_meta.to_parquet(SEQ_META_PATH,    index=False)
+    df_labels.to_parquet(LABEL_CACHE_PATH, index=False)
+    del all_embeddings, df_meta, df_labels
+    print(f"Cache saved → {SEQ_EMB_PATH}, {SEQ_META_PATH}, {LABEL_CACHE_PATH}")
 
 # ---- load emb_matrix + meta ----
 print("\nLoading sequence cache...")
@@ -321,24 +312,22 @@ print(f"Step 4 done — {time.time() - t0:.1f}s")
 # ============================================================
 t0 = time.time()
 
-def make_label_vector(codes):
-    vec = np.zeros(NUM_CLASSES, dtype=np.float32)
-    for c in to_list(codes):
-        if c in label_vocab:
-            vec[label_vocab[c]] = 1.0
-    return vec
+def codes_to_indices(codes):
+    if not codes:
+        return np.empty(0, dtype=np.int32)
+    idxs = [label_vocab[str(c)] for c in codes if str(c) in label_vocab]
+    return np.array(idxs, dtype=np.int32) if idxs else np.empty(0, dtype=np.int32)
 
 class VisitDataset(Dataset):
     def __init__(self, data, emb_matrix, label_lookup, max_seq_len):
-        self.emb_matrix   = emb_matrix
-        self.label_lookup = label_lookup
-        self.samples      = []
+        self.emb_matrix = emb_matrix
+        self.samples    = []
 
         for member_id, seq_nums, dt_vals, emb_idxs in data:
-            seq_nums  = seq_nums[-max_seq_len:]
-            dt_vals   = dt_vals[-max_seq_len:]
-            emb_idxs  = emb_idxs[-max_seq_len:]
-            n         = len(seq_nums)
+            seq_nums = seq_nums[-max_seq_len:]
+            dt_vals  = dt_vals[-max_seq_len:]
+            emb_idxs = emb_idxs[-max_seq_len:]
+            n        = len(seq_nums)
 
             entry = label_lookup.get((member_id, int(seq_nums[-1])))
             if entry is None:
@@ -351,29 +340,36 @@ class VisitDataset(Dataset):
                 emb_idxs = np.concatenate([emb_idxs, np.zeros(pad, dtype=np.int32)])
                 dt_vals  = np.concatenate([dt_vals,  np.zeros(pad, dtype=np.int8)])
 
+            # convert label codes to index arrays once at init — no dict lookup in __getitem__
             self.samples.append((
                 emb_idxs.astype(np.int32)
                 ,dt_vals.astype(np.int64)
                 ,np.int64(n)
-                ,l30, l60, l180
+                ,codes_to_indices(l30)
+                ,codes_to_indices(l60)
+                ,codes_to_indices(l180)
             ))
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        emb_idxs, dt_vals, n, l30, l60, l180 = self.samples[idx]
+        emb_idxs, dt_vals, n, idx30, idx60, idx180 = self.samples[idx]
 
-        embeddings      = self.emb_matrix[emb_idxs]   # fancy index → [max_seq_len, 128], already a copy
-        embeddings[n:]  = 0.0                          # zero padding positions
+        embeddings     = self.emb_matrix[emb_idxs]  # fancy index → copy
+        embeddings[n:] = 0.0
+
+        l30 = np.zeros(NUM_CLASSES, dtype=np.float32); l30[idx30] = 1.0
+        l60 = np.zeros(NUM_CLASSES, dtype=np.float32); l60[idx60] = 1.0
+        l180 = np.zeros(NUM_CLASSES, dtype=np.float32); l180[idx180] = 1.0
 
         return {
             'embeddings': torch.from_numpy(embeddings)
             ,'delta_t'  : torch.from_numpy(dt_vals)
             ,'length'   : torch.tensor(n,   dtype=torch.long)
-            ,'label_30' : torch.from_numpy(make_label_vector(l30))
-            ,'label_60' : torch.from_numpy(make_label_vector(l60))
-            ,'label_180': torch.from_numpy(make_label_vector(l180))
+            ,'label_30' : torch.from_numpy(l30)
+            ,'label_60' : torch.from_numpy(l60)
+            ,'label_180': torch.from_numpy(l180)
         }
 
 train_dataset = VisitDataset(train_data, emb_matrix, label_lookup, MAX_SEQ_LEN)
