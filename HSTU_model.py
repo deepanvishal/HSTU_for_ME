@@ -4,8 +4,9 @@
 
 import os
 import sys
-import pickle
+import time
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -35,13 +36,18 @@ LABEL_VOCAB_PATH = {
     ,'dx'       : './embeddings/dx_label_vocab.pkl'
 }
 
+import pickle
 assert TARGET in LABEL_COLS, f"TARGET must be one of {list(LABEL_COLS.keys())}"
 
 COL_30, COL_60, COL_180 = LABEL_COLS[TARGET]
-CHECKPOINT_PATH          = f'./checkpoints/best_model_{TARGET}_{int(SAMPLE_PCT*100)}pct.pt'
-SEQ_CACHE_PATH           = f'./data/member_sequences_{int(SAMPLE_PCT*100)}pct.pkl'
-LABEL_CACHE_PATH         = f'./data/member_labels_{TARGET}_{int(SAMPLE_PCT*100)}pct.pkl'
-LOAD_FROM_CACHE          = False
+PCT                      = int(SAMPLE_PCT * 100)
+CHECKPOINT_PATH          = f'./checkpoints/best_model_{TARGET}_{PCT}pct.pt'
+
+# cache — no pickle; npy for matrices, parquet for tabular
+SEQ_EMB_PATH    = f'./data/seq_emb_{PCT}pct.npy'
+SEQ_META_PATH   = f'./data/seq_meta_{PCT}pct.parquet'
+LABEL_CACHE_PATH = f'./data/member_labels_{TARGET}_{PCT}pct.parquet'
+LOAD_FROM_CACHE  = False
 
 MAX_SEQ_LEN   = 20
 BATCH_SIZE    = 512
@@ -61,14 +67,11 @@ DEVICE        = 'cuda' if torch.cuda.is_available() else 'cpu'
 NUM_GPUS      = torch.cuda.device_count()
 NUM_WORKERS   = min(4 * NUM_GPUS, 16)
 
-print(f"Target:      {TARGET}")
-print(f"Sample:      {SAMPLE_PCT*100}%")
-print(f"Checkpoint:  {CHECKPOINT_PATH}")
-print(f"Device:      {DEVICE}")
-print(f"GPUs:        {NUM_GPUS}")
-print(f"Workers:     {NUM_WORKERS}")
-print(f"Batch size:  {BATCH_SIZE}")
-print(f"Cache:       {LOAD_FROM_CACHE}")
+print(f"Target:     {TARGET}")
+print(f"Sample:     {SAMPLE_PCT*100}%")
+print(f"Checkpoint: {CHECKPOINT_PATH}")
+print(f"Device:     {DEVICE}  GPUs: {NUM_GPUS}")
+print(f"Cache:      {LOAD_FROM_CACHE}")
 
 # ============================================================
 # UTILITY
@@ -85,7 +88,8 @@ def to_list(val):
 # ============================================================
 # STEP 1: LOAD EMBEDDINGS
 # ============================================================
-print("\nLoading embeddings...")
+t0 = time.time()
+
 provider_matrix  = np.load('./embeddings/provider_embeddings.npy')
 specialty_matrix = np.load('./embeddings/specialty_embeddings.npy')
 dx_matrix        = np.load('./embeddings/dx_embeddings.npy')
@@ -101,18 +105,16 @@ with open(LABEL_VOCAB_PATH[TARGET], 'rb') as f:
     label_vocab = pickle.load(f)
 
 NUM_CLASSES = len(label_vocab)
-print(f"Target:          {TARGET}")
-print(f"Label vocab:     {NUM_CLASSES:,}")
-print(f"Provider vocab:  {len(provider_vocab):,}")
-print(f"DX vocab:        {len(dx_vocab):,}")
-print(f"Procedure vocab: {len(procedure_vocab):,}")
+print(f"\nLabel vocab: {NUM_CLASSES:,}  Provider vocab: {len(provider_vocab):,}  DX vocab: {len(dx_vocab):,}")
+print(f"Step 1 done — {time.time() - t0:.1f}s")
 
 # ============================================================
 # STEP 2: VECTORIZED EMBEDDING BUILD
-# Replaces per-row itertuples() loop with bulk numpy scatter ops.
-# Each modality: explode list column → map vocab → scatter-add
-# into output matrix → divide by count → fill unknowns with unk.
+# Per modality: scatter-add all codes per row into output matrix,
+# divide by count, fill unknowns with unk vector.
+# No per-row Python loop — all work is in numpy C layer.
 # ============================================================
+t0 = time.time()
 
 def _embed_column_vectorized(series, matrix, vocab, unk_vec):
     n_rows = len(series)
@@ -138,34 +140,36 @@ def _embed_column_vectorized(series, matrix, vocab, unk_vec):
 
 
 def build_embeddings_vectorized(df):
-    """
-    Input:  dataframe chunk with columns provider_ids, specialty_codes,
-            dx_list, procedure_codes
-    Output: float32 array [N, 128]
-    """
     p_emb  = _embed_column_vectorized(df['provider_ids'],    provider_matrix,  provider_vocab,  unk_emb['provider'])
     s_emb  = _embed_column_vectorized(df['specialty_codes'], specialty_matrix, specialty_vocab, unk_emb['specialty'])
     d_emb  = _embed_column_vectorized(df['dx_list'],         dx_matrix,        dx_vocab,        unk_emb['dx'])
     pr_emb = _embed_column_vectorized(df['procedure_codes'], procedure_matrix, procedure_vocab, unk_emb['procedure'])
     return np.concatenate([p_emb, s_emb, d_emb, pr_emb], axis=1).astype(np.float32)
 
-
+print(f"Step 2 done — {time.time() - t0:.1f}s")
 
 # ============================================================
 # STEP 3: LOAD DATA
+#
+# Design:
+#   emb_matrix [N_total, 128] — single npy, loaded read-only once,
+#     shared across DataLoader workers via fork (no copy-on-write
+#     since workers only read)
+#   member_sequences[member_id] = (seq_nums, dt_arr, emb_idx_arr)
+#     — three parallel int arrays, no Python dicts, no embedding copies
+#   label_lookup[(member_id, visit_seq_num)] = (l30, l60, l180)
+#     — flat dict of sparse code lists
+#   Cache: npy + parquet only, no pickle
 # ============================================================
-seq_cached   = LOAD_FROM_CACHE and os.path.exists(SEQ_CACHE_PATH)
+t0 = time.time()
+
+seq_cached   = LOAD_FROM_CACHE and os.path.exists(SEQ_EMB_PATH) and os.path.exists(SEQ_META_PATH)
 label_cached = LOAD_FROM_CACHE and os.path.exists(LABEL_CACHE_PATH)
 
-if seq_cached and label_cached:
-    print("\nLoading from cache...")
-    with open(SEQ_CACHE_PATH,   'rb') as f: member_sequences = pickle.load(f)
-    with open(LABEL_CACHE_PATH, 'rb') as f: member_labels    = pickle.load(f)
-    print(f"Members loaded from cache: {len(member_sequences):,}")
-
-else:
+if not seq_cached or not label_cached:
     client = bigquery.Client(project='anbc-hcb-dev')
 
+if not seq_cached:
     print("\nSampling members in BigQuery...")
     client.query(f"""
         CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` AS
@@ -180,117 +184,143 @@ else:
     """).to_dataframe().iloc[0]['n']
     print(f"Sampled members: {member_count:,}")
 
-    sequence_query = """
-    SELECT
-        s.member_id
-        ,s.visit_seq_num
-        ,s.delta_t_bucket
-        ,s.provider_ids
-        ,s.specialty_codes
-        ,s.dx_list
-        ,s.procedure_codes
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence` s
-    INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` m
-        ON s.member_id = m.member_id
-    ORDER BY s.member_id, s.visit_seq_num
-    """
+    print("Loading sequences from BQ...")
+    df_seq = client.query("""
+        SELECT
+            s.member_id
+            ,s.visit_seq_num
+            ,s.delta_t_bucket
+            ,s.provider_ids
+            ,s.specialty_codes
+            ,s.dx_list
+            ,s.procedure_codes
+        FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_visit_sequence` s
+        INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` m
+            ON s.member_id = m.member_id
+        ORDER BY s.member_id, s.visit_seq_num
+    """).to_dataframe(create_bqstorage_client=True)
+    print(f"Sequence rows: {len(df_seq):,}")
 
-    label_query = f"""
-    SELECT
-        l.member_id
-        ,l.visit_seq_num
-        ,l.{COL_30}
-        ,l.{COL_60}
-        ,l.{COL_180}
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_label` l
-    INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` m
-        ON l.member_id = m.member_id
-    ORDER BY l.member_id, l.visit_seq_num
-    """
+    print("Building embeddings (vectorized)...")
+    all_embeddings = build_embeddings_vectorized(df_seq)     # [N, 128] float32
+    print(f"Embeddings shape: {all_embeddings.shape}")
 
-    member_sequences = defaultdict(list)
-    member_labels    = defaultdict(list)
+    # build metadata — pure pandas, no loops
+    # visit_idx = original row position = index into all_embeddings
+    df_meta = pd.DataFrame({
+        'member_id'    : df_seq['member_id'].values
+        ,'visit_seq_num': df_seq['visit_seq_num'].values.astype(np.int32)
+        ,'dt_bucket'    : df_seq['delta_t_bucket'].values.clip(0, NUM_RATINGS - 1).astype(np.int8)
+        ,'visit_idx'    : np.arange(len(df_seq), dtype=np.int32)
+    })
+    del df_seq
 
-    if not seq_cached:
-        print("\nLoading sequences from BQ...")
-        df_seq = client.query(sequence_query).to_dataframe(create_bqstorage_client=True)
-        print(f"Sequence rows: {len(df_seq):,}")
+    np.save(SEQ_EMB_PATH, all_embeddings)
+    df_meta.to_parquet(SEQ_META_PATH, index=False)
+    del all_embeddings, df_meta
+    print(f"Sequence cache saved → {SEQ_EMB_PATH}, {SEQ_META_PATH}")
 
-        print("Building embeddings (vectorized)...")
-        all_embeddings = build_embeddings_vectorized(df_seq)
-        print("Embedding build complete — building member sequences...")
-
-        # assign embeddings back and build member dict — pure numpy/pandas, no embedding work
-        df_seq['visit_emb']  = list(all_embeddings)
-        df_seq['dt_bucket']   = df_seq['delta_t_bucket'].clip(upper=NUM_RATINGS - 1).astype(int)
-
-        for member_id, group in df_seq.groupby('member_id', sort=False):
-            member_sequences[member_id] = [
-                {
-                    'visit_seq_num'  : row.visit_seq_num
-                    ,'delta_t_bucket': row.dt_bucket
-                    ,'embedding'     : row.visit_emb
-                }
-                for row in group.itertuples()
-            ]
-
-        del all_embeddings, df_seq
-
-        print("Saving sequence cache...")
-        with open(SEQ_CACHE_PATH, 'wb') as f:
-            pickle.dump(dict(member_sequences), f)
-
-    else:
-        print("Loading sequence cache...")
-        with open(SEQ_CACHE_PATH, 'rb') as f:
-            member_sequences = pickle.load(f)
-
-    print("\nLoading labels...")
-    df_lab = client.query(label_query).to_dataframe(create_bqstorage_client=True)
+if not label_cached:
+    print("Loading labels from BQ...")
+    df_lab = client.query(f"""
+        SELECT
+            l.member_id
+            ,l.visit_seq_num
+            ,l.{COL_30}
+            ,l.{COL_60}
+            ,l.{COL_180}
+        FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_label` l
+        INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_sampled_members` m
+            ON l.member_id = m.member_id
+        ORDER BY l.member_id, l.visit_seq_num
+    """).to_dataframe(create_bqstorage_client=True)
     print(f"Label rows: {len(df_lab):,}")
 
-    # label build — no embedding work, fast pandas groupby
-    for row in df_lab.itertuples():
-        member_labels[row.member_id].append({
-            'visit_seq_num': row.visit_seq_num
-            ,'label_30'    : to_list(getattr(row, COL_30))
-            ,'label_60'    : to_list(getattr(row, COL_60))
-            ,'label_180'   : to_list(getattr(row, COL_180))
-        })
+    df_lab[['member_id', 'visit_seq_num', COL_30, COL_60, COL_180]].to_parquet(
+        LABEL_CACHE_PATH, index=False
+    )
     del df_lab
+    print(f"Label cache saved → {LABEL_CACHE_PATH}")
 
-    print("Saving label cache...")
-    with open(LABEL_CACHE_PATH, 'wb') as f:
-        pickle.dump(dict(member_labels), f)
-    print(f"Cache saved — set LOAD_FROM_CACHE=True for next run")
+# ---- load emb_matrix + meta ----
+print("\nLoading sequence cache...")
+emb_matrix = np.load(SEQ_EMB_PATH)
+emb_matrix.setflags(write=False)              # read-only — safe fork sharing in DataLoader workers
+df_meta    = pd.read_parquet(SEQ_META_PATH)
+df_meta    = df_meta.sort_values('member_id', kind='stable')   # ensure contiguous member blocks
 
-print(f"Members loaded: {len(member_sequences):,}")
+member_ids_arr = df_meta['member_id'].values
+seq_nums_all   = df_meta['visit_seq_num'].values
+dt_all         = df_meta['dt_bucket'].values
+emb_idx_all    = df_meta['visit_idx'].values
+del df_meta
+
+# build member_sequences — sort + cumsum, zero Python row loops
+unique_members, counts = np.unique(member_ids_arr, return_counts=True)
+offsets = np.concatenate([[0], np.cumsum(counts)])
+
+member_sequences = {
+    mid: (seq_nums_all[s:e], dt_all[s:e], emb_idx_all[s:e])
+    for mid, s, e in zip(unique_members, offsets[:-1], offsets[1:])
+}
+del member_ids_arr, seq_nums_all, dt_all, emb_idx_all
+print(f"Members: {len(member_sequences):,}  Total visits: {emb_matrix.shape[0]:,}")
+
+# ---- load labels ----
+print("Loading label cache...")
+df_lab = pd.read_parquet(LABEL_CACHE_PATH)
+
+# flat lookup: (member_id, visit_seq_num) → (l30, l60, l180) code lists
+# zip over pandas series — no Python row loop
+label_lookup = dict(zip(
+    zip(df_lab['member_id'].tolist(), df_lab['visit_seq_num'].tolist())
+    ,zip(
+        df_lab[COL_30].tolist()
+        ,df_lab[COL_60].tolist()
+        ,df_lab[COL_180].tolist()
+    )
+))
+del df_lab
+print(f"Label entries: {len(label_lookup):,}")
+print(f"\nStep 3 done — {time.time() - t0:.1f}s")
 
 # ============================================================
 # STEP 4: TRAIN / VAL / TEST SPLIT
+# Array slices are numpy views — zero copy.
 # ============================================================
+t0 = time.time()
+
 train_data = []
 val_data   = []
 test_data  = []
 
-for member_id, visits in member_sequences.items():
-    n = len(visits)
+for member_id, (seq_nums, dt_vals, emb_idxs) in member_sequences.items():
+    n = len(seq_nums)
     if n < 4:
         continue
 
     train_cut = int(n * 0.75)
     val_cut   = int(n * 0.875)
-    labels    = {l['visit_seq_num']: l for l in member_labels.get(member_id, [])}
 
-    train_data.append((member_id, visits[:train_cut], labels))
-    val_data.append((member_id,   visits[:val_cut],   labels))
-    test_data.append((member_id,  visits[:-1],        labels))
+    train_data.append((member_id, seq_nums[:train_cut], dt_vals[:train_cut], emb_idxs[:train_cut]))
+    val_data.append((member_id,   seq_nums[:val_cut],   dt_vals[:val_cut],   emb_idxs[:val_cut]))
+    test_data.append((member_id,  seq_nums[:-1],        dt_vals[:-1],        emb_idxs[:-1]))
 
 print(f"Train: {len(train_data):,}  Val: {len(val_data):,}  Test: {len(test_data):,}")
+print(f"Step 4 done — {time.time() - t0:.1f}s")
 
 # ============================================================
 # STEP 5: DATASET
+#
+# Design:
+#   self.samples stores (emb_idxs_padded, dt_padded, n, l30, l60, l180)
+#   — index arrays + sparse code lists only, no pre-expanded embeddings
+#   — no pre-expanded label vectors (critical for dx: 10K+ classes × 1.5M rows)
+#   __getitem__ does emb_matrix[emb_idxs] — numpy fancy index, fast
+#   emb_matrix is read-only; fork in DataLoader workers = zero memory copy
 # ============================================================
+t0 = time.time()
+
 def make_label_vector(codes):
     vec = np.zeros(NUM_CLASSES, dtype=np.float32)
     for c in to_list(codes):
@@ -299,74 +329,73 @@ def make_label_vector(codes):
     return vec
 
 class VisitDataset(Dataset):
-    def __init__(self, data, max_seq_len):
-        self.samples = []
-        for member_id, visits, labels in data:
-            visits = visits[-max_seq_len:]
-            n      = len(visits)
+    def __init__(self, data, emb_matrix, label_lookup, max_seq_len):
+        self.emb_matrix   = emb_matrix
+        self.label_lookup = label_lookup
+        self.samples      = []
 
-            last_seq_num = visits[-1]['visit_seq_num']
-            label        = labels.get(last_seq_num)
-            if label is None:
+        for member_id, seq_nums, dt_vals, emb_idxs in data:
+            seq_nums  = seq_nums[-max_seq_len:]
+            dt_vals   = dt_vals[-max_seq_len:]
+            emb_idxs  = emb_idxs[-max_seq_len:]
+            n         = len(seq_nums)
+
+            entry = label_lookup.get((member_id, int(seq_nums[-1])))
+            if entry is None:
                 continue
 
-            embeddings = np.stack([v['embedding'] for v in visits])
-            delta_t    = np.array([v['delta_t_bucket'] for v in visits], dtype=np.int64)
+            l30, l60, l180 = entry
 
             pad = max_seq_len - n
             if pad > 0:
-                embeddings = np.vstack([embeddings, np.zeros((pad, EMBEDDING_DIM), dtype=np.float32)])
-                delta_t    = np.concatenate([delta_t, np.zeros(pad, dtype=np.int64)])
+                emb_idxs = np.concatenate([emb_idxs, np.zeros(pad, dtype=np.int32)])
+                dt_vals  = np.concatenate([dt_vals,  np.zeros(pad, dtype=np.int8)])
 
             self.samples.append((
-                embeddings
-                ,delta_t
+                emb_idxs.astype(np.int32)
+                ,dt_vals.astype(np.int64)
                 ,np.int64(n)
-                ,make_label_vector(label['label_30'])
-                ,make_label_vector(label['label_60'])
-                ,make_label_vector(label['label_180'])
+                ,l30, l60, l180
             ))
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        emb, dt, n, l30, l60, l180 = self.samples[idx]
+        emb_idxs, dt_vals, n, l30, l60, l180 = self.samples[idx]
+
+        embeddings      = self.emb_matrix[emb_idxs]   # fancy index → [max_seq_len, 128], already a copy
+        embeddings[n:]  = 0.0                          # zero padding positions
+
         return {
-            'embeddings': torch.from_numpy(emb)
-            ,'delta_t'  : torch.from_numpy(dt)
+            'embeddings': torch.from_numpy(embeddings)
+            ,'delta_t'  : torch.from_numpy(dt_vals)
             ,'length'   : torch.tensor(n,   dtype=torch.long)
-            ,'label_30' : torch.from_numpy(l30)
-            ,'label_60' : torch.from_numpy(l60)
-            ,'label_180': torch.from_numpy(l180)
+            ,'label_30' : torch.from_numpy(make_label_vector(l30))
+            ,'label_60' : torch.from_numpy(make_label_vector(l60))
+            ,'label_180': torch.from_numpy(make_label_vector(l180))
         }
 
-train_dataset = VisitDataset(train_data, MAX_SEQ_LEN)
-val_dataset   = VisitDataset(val_data,   MAX_SEQ_LEN)
-test_dataset  = VisitDataset(test_data,  MAX_SEQ_LEN)
+train_dataset = VisitDataset(train_data, emb_matrix, label_lookup, MAX_SEQ_LEN)
+val_dataset   = VisitDataset(val_data,   emb_matrix, label_lookup, MAX_SEQ_LEN)
+test_dataset  = VisitDataset(test_data,  emb_matrix, label_lookup, MAX_SEQ_LEN)
 
-print(f"Train samples: {len(train_dataset):,}")
-print(f"Val samples:   {len(val_dataset):,}")
-print(f"Test samples:  {len(test_dataset):,}")
+print(f"Train: {len(train_dataset):,}  Val: {len(val_dataset):,}  Test: {len(test_dataset):,}")
 
-train_loader = DataLoader(
-    train_dataset, batch_size=BATCH_SIZE, shuffle=True
-    ,num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=True
-)
-val_loader   = DataLoader(
-    val_dataset, batch_size=BATCH_SIZE, shuffle=False
-    ,num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=True
-)
-test_loader  = DataLoader(
-    test_dataset, batch_size=BATCH_SIZE, shuffle=False
-    ,num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=True
-)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                          num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=True)
+val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,
+                          num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=True)
+test_loader  = DataLoader(test_dataset,  batch_size=BATCH_SIZE, shuffle=False,
+                          num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=True)
 
 print(f"Train batches: {len(train_loader):,}  Val: {len(val_loader):,}  Test: {len(test_loader):,}")
+print(f"Step 5 done — {time.time() - t0:.1f}s")
 
 # ============================================================
 # STEP 6: MODEL
 # ============================================================
+t0 = time.time()
 from hstu_pytorch import PureHSTU
 
 model = PureHSTU(
@@ -396,10 +425,13 @@ except Exception as e:
     print(f"torch.compile skipped: {e}")
 
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+print(f"Step 6 done — {time.time() - t0:.1f}s")
 
 # ============================================================
 # STEP 7: METRICS
 # ============================================================
+t0 = time.time()
+
 def ndcg_at_k(pred, label, k):
     top_k     = torch.topk(pred, k, dim=1).indices
     gains     = label.gather(1, top_k).float()
@@ -445,8 +477,7 @@ def evaluate(loader, model, k_list):
             pred_60  = pred_60.float()
             pred_180 = pred_180.float()
 
-            B          = embeddings.size(0)
-            n_samples += B
+            n_samples += embeddings.size(0)
 
             for k in k_list:
                 for window, pred, label in [
@@ -472,9 +503,13 @@ def print_metrics(metrics, split='Val'):
             hit  = metrics.get(f'{window}_hit@{k}',  0)
             print(f"    @{k:2d} — NDCG: {ndcg:.4f}  Prec: {prec:.4f}  Rec: {rec:.4f}  Hit: {hit:.4f}")
 
+print(f"Step 7 done — {time.time() - t0:.1f}s")
+
 # ============================================================
 # STEP 8: TRAINING LOOP
 # ============================================================
+t0 = time.time()
+
 optimizer  = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
 scheduler  = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 scaler     = torch.cuda.amp.GradScaler()
@@ -483,13 +518,12 @@ best_ndcg  = 0.0
 patience   = 5
 no_improve = 0
 
-def get_raw_model(model):
-    raw = model
-    if hasattr(raw, '_orig_mod'):
-        raw = raw._orig_mod
-    if isinstance(raw, nn.DataParallel):
-        raw = raw.module
-    return raw
+def get_raw_model(m):
+    if hasattr(m, '_orig_mod'):
+        m = m._orig_mod
+    if isinstance(m, nn.DataParallel):
+        m = m.module
+    return m
 
 for epoch in range(EPOCHS):
     model.train()
@@ -533,28 +567,28 @@ for epoch in range(EPOCHS):
         best_ndcg  = val_ndcg
         no_improve = 0
         torch.save({
-            'epoch'               : epoch
-            ,'model_state_dict'   : get_raw_model(model).state_dict()
+            'epoch'                : epoch
+            ,'model_state_dict'    : get_raw_model(model).state_dict()
             ,'optimizer_state_dict': optimizer.state_dict()
             ,'scheduler_state_dict': scheduler.state_dict()
             ,'label_vocab'         : label_vocab
             ,'best_val_ndcg'       : best_ndcg
             ,'target'              : TARGET
             ,'config': {
-                'embedding_dim'  : EMBEDDING_DIM
-                ,'hstu_dim'      : HSTU_DIM
-                ,'num_classes'   : NUM_CLASSES
-                ,'max_seq_len'   : MAX_SEQ_LEN
-                ,'num_blocks'    : NUM_BLOCKS
-                ,'num_heads'     : NUM_HEADS
-                ,'linear_dim'    : LINEAR_DIM
-                ,'attention_dim' : ATTENTION_DIM
-                ,'dropout_rate'  : DROPOUT_RATE
-                ,'num_ratings'   : NUM_RATINGS
-                ,'rating_dim'    : RATING_DIM
-                ,'eval_k'        : EVAL_K
-                ,'sample_pct'    : SAMPLE_PCT
-                ,'target'        : TARGET
+                'embedding_dim' : EMBEDDING_DIM
+                ,'hstu_dim'     : HSTU_DIM
+                ,'num_classes'  : NUM_CLASSES
+                ,'max_seq_len'  : MAX_SEQ_LEN
+                ,'num_blocks'   : NUM_BLOCKS
+                ,'num_heads'    : NUM_HEADS
+                ,'linear_dim'   : LINEAR_DIM
+                ,'attention_dim': ATTENTION_DIM
+                ,'dropout_rate' : DROPOUT_RATE
+                ,'num_ratings'  : NUM_RATINGS
+                ,'rating_dim'   : RATING_DIM
+                ,'eval_k'       : EVAL_K
+                ,'sample_pct'   : SAMPLE_PCT
+                ,'target'       : TARGET
             }
         }, CHECKPOINT_PATH)
         print(f"  Saved → {CHECKPOINT_PATH}  val NDCG@T180: {best_ndcg:.4f}")
@@ -564,23 +598,28 @@ for epoch in range(EPOCHS):
             print(f"Early stopping at epoch {epoch+1}")
             break
 
+print(f"Step 8 done — {time.time() - t0:.1f}s")
+
 # ============================================================
 # STEP 9: TEST EVALUATION
 # ============================================================
+t0 = time.time()
+
 print(f"\nLoading best model: {CHECKPOINT_PATH}")
 checkpoint = torch.load(CHECKPOINT_PATH, weights_only=False)
+config     = checkpoint['config']
 
 base_model = PureHSTU(
-    max_seq_len        = MAX_SEQ_LEN
-    ,embedding_dim     = EMBEDDING_DIM
-    ,num_blocks        = NUM_BLOCKS
-    ,num_heads         = NUM_HEADS
-    ,linear_dim        = LINEAR_DIM
-    ,attention_dim     = ATTENTION_DIM
-    ,dropout_rate      = DROPOUT_RATE
-    ,attn_dropout_rate = DROPOUT_RATE
-    ,num_ratings       = NUM_RATINGS
-    ,rating_dim        = RATING_DIM
+    max_seq_len        = config['max_seq_len']
+    ,embedding_dim     = config['embedding_dim']
+    ,num_blocks        = config.get('num_blocks', 2)
+    ,num_heads         = config.get('num_heads',  4)
+    ,linear_dim        = config['linear_dim']
+    ,attention_dim     = config['attention_dim']
+    ,dropout_rate      = config['dropout_rate']
+    ,attn_dropout_rate = config['dropout_rate']
+    ,num_ratings       = config['num_ratings']
+    ,rating_dim        = config['rating_dim']
     ,num_specialties   = NUM_CLASSES
 ).to(DEVICE)
 
@@ -589,4 +628,5 @@ base_model.load_state_dict(checkpoint['model_state_dict'])
 test_metrics = evaluate(test_loader, base_model, EVAL_K)
 print_metrics(test_metrics, 'Test')
 
+print(f"Step 9 done — {time.time() - t0:.1f}s")
 print(f"\nNotebook 2 complete — target: {TARGET}  checkpoint: {CHECKPOINT_PATH}")
