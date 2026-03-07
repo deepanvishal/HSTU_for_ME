@@ -313,8 +313,13 @@ print(f"Step 4 done — {time.time() - t0:.1f}s")
 t0 = time.time()
 
 def codes_to_indices(codes):
-    if not codes:
+    if codes is None:
         return np.empty(0, dtype=np.int32)
+    if isinstance(codes, (np.ndarray, list)):
+        if len(codes) == 0:
+            return np.empty(0, dtype=np.int32)
+    else:
+        codes = [codes]
     idxs = [label_vocab[str(c)] for c in codes if str(c) in label_vocab]
     return np.array(idxs, dtype=np.int32) if idxs else np.empty(0, dtype=np.int32)
 
