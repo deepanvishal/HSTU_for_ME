@@ -73,9 +73,9 @@ if not SEQ_CACHED:
                 ,s.visit_seq_num
                 ,{avg_cols}
             FROM `{DS}.A870800_claims_gen_rec_visit_sequence` s
-            WHERE s.recency_rank <= 20
             LEFT JOIN UNNEST(s.{arr_col}) AS code
             LEFT JOIN `{DS}.{emb_table}` e ON CAST(code AS STRING) = e.code
+            WHERE s.recency_rank <= 20
             GROUP BY s.member_id, s.visit_seq_num
         """
         cfg = bigquery.QueryJobConfig(
@@ -119,12 +119,12 @@ if not SEQ_CACHED:
             ,l.{COL_60}
             ,l.{COL_180}
         FROM `{DS}.A870800_claims_gen_rec_visit_sequence` s
-        WHERE s.recency_rank <= 20
         LEFT JOIN `{DS}.A870800_full_provider_agg`  pa  ON s.member_id = pa.member_id  AND s.visit_seq_num = pa.visit_seq_num
         LEFT JOIN `{DS}.A870800_full_specialty_agg` sa  ON s.member_id = sa.member_id  AND s.visit_seq_num = sa.visit_seq_num
         LEFT JOIN `{DS}.A870800_full_dx_agg`        da  ON s.member_id = da.member_id  AND s.visit_seq_num = da.visit_seq_num
         LEFT JOIN `{DS}.A870800_full_procedure_agg` pra ON s.member_id = pra.member_id AND s.visit_seq_num = pra.visit_seq_num
         LEFT JOIN `{DS}.A870800_claims_gen_rec_label` l  ON s.member_id = l.member_id  AND s.visit_seq_num = l.visit_seq_num
+        WHERE s.recency_rank <= 20
     """
 
     cfg = bigquery.QueryJobConfig(
