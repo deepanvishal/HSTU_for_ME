@@ -1,18 +1,14 @@
-# Provider Affiliation & Next Visit Prediction
-**ML System Design Document — HSTU Architecture**  
-Healthcare Data Science
+# Provider Network Referral Prediction
+**ML System Design — HSTU Architecture**
+Healthcare Network Configuration | Data Science
 
 ---
 
-## 1. Business Problem
+## Business Objective
 
-Insurance claims data is used to understand provider affiliations and predict what happens after a member visits a provider with a specific diagnosis. The network team needs to identify high-value referral chains (e.g. PCP John referring to Specialist Jacob) so they can target upstream referrers who drive members to high-quality, efficient downstream providers.
+Insurance claims data is used to understand provider affiliations and predict what happens after a member visits a provider with a specific diagnosis. The network team needs to identify high-value referral chains — for example, PCP John referring to Specialist Jacob — so they can target upstream referrers who drive members to high-quality, efficient downstream providers.
 
----
-
-## 2. Required Output Levels
-
-One model trained at member journey level. Outputs aggregated to four levels:
+One model trained at the member journey level. Outputs aggregated to four levels:
 
 | Level | Input | Output |
 |---|---|---|
@@ -21,238 +17,300 @@ One model trained at member journey level. Outputs aggregated to four levels:
 | 3 | Provider Type + Diagnosis + Member Profile | Risk-adjusted next visit specialty |
 | 4 | Provider John + Diagnosis + Member Profile | Most specific prediction |
 
-Levels 1 and 2 are statistical aggregations of the member-level model output. No separate model needed.
+Levels 1 and 2 are statistical aggregations of the member-level model output. No separate model per level is required.
 
 ---
 
-## 3. Data Sources
+## Week 1 — Barriers
+
+### Barrier 1 — Defining the First Visit
+
+Identifying where a care episode begins is the most significant analytical challenge. Without a reliable first visit anchor, the sequence model learns from noise as much as signal.
+
+A first visit should satisfy two conditions:
+1. A qualifying provider contact — most reliably a PCP visit, though specialist-initiated episodes exist
+2. A new or recurrent diagnosis — a code not seen in the member's claim history in the prior 12 months, or a chronic condition flagged as active
+
+**Option A — PCP + New Diagnosis (Phase 1)**
+A PCP encounter where a qualifying diagnosis code appears for the first time in a rolling 12-month lookback. Simple, defensible, fast.
+Limitation: misses specialist-initiated or ER-initiated episodes.
+
+**Option B — Episode of Care (Phase 2)**
+Claims grouped into episodes using a 90-day gap rule. First claim in a new episode = first visit. Clinically accurate but requires condition-specific gap definitions.
+
+Recommendation: Start with Option A. Tighten to Option B once model value is proven.
+
+---
+
+### Barrier 2 — Scope
+
+Starting with a single specialty rather than the full provider network.
+
+**Why:**
+- Referral patterns within one specialty are more homogeneous and easier to validate
+- Smaller label space produces measurable accuracy benchmarks early
+- Clinical SME validation is tractable on a focused cohort
+- Lessons transfer directly to the expansion framework
+
+**Proposed starting specialty:** Cardiology or Oncology — high visit frequency, well-defined referral chains, interpretable pathways.
+
+---
+
+### Barrier 3 — Scale and Accuracy
+
+Training on unfiltered full-population data across all conditions produces low accuracy. Initial benchmarks on 1% sample with unfiltered sequences: approximately 20% on next-visit prediction. Expected — not a model failure.
+
+**Root cause:** Mixing all conditions forces the model to find a single representation for fundamentally different care journeys. Diabetic patient sequences look nothing like oncology sequences.
+
+**How this is addressed — two-stage prediction:**
+
+Stage 1 predicts the next likely specialty. Label space is small (~50 specialties), patterns are generalizable, accuracy is measurably higher.
+
+Stage 2 maps specialty to provider. When provider-level data is sufficient, predict provider directly. When provider data is sparse, specialty prediction is the output — mapped to available in-network providers for that specialty and geography downstream.
+
+The model degrades gracefully. Provider-level prediction is an enhancement, not a dependency. In thin markets, specialty prediction still produces actionable network output.
+
+---
+
+## Data Sources
 
 | Table | Key Fields |
 |---|---|
-| Medical Claims | member_id, claim_id, service_date, provider_id, provider_type, place_of_service, diagnosis_code (one per claim), procedure_code, gender |
+| Medical Claims | member_id, claim_id, service_date, provider_id, provider_type, place_of_service, diagnosis_code, procedure_code, gender |
 | Provider Specialty | provider_id, specialty_code, specialty_name |
 
 No pharmacy claims. No member eligibility table. No line of business. Everything derives from these two tables.
 
 ---
 
-## 4. Data Preparation Pipeline
+## Data Preparation
 
-### 4.1 Scope Filter
-
+### Scope Filter
 - Keep: service_date within 24-month lookback window
-- Keep: provider_type in 20 specialties + PCP (joined to specialty table)
+- Keep: last 20 visits per member (recency_rank <= 20) — HSTU only uses the last 20 visits; pulling more wastes compute
+- Keep: provider_type in 20 specialties + PCP
 - Remove: ER place_of_service (POS 23)
-- Remove: duplicate/adjusted claims — keep latest version
+- Remove: duplicate/adjusted claims — keep latest version per claim
 - Remove: members with fewer than 10 visits total
 
-### 4.2 Visit Construction
+### Visit Construction
 
-Same member + same date = 1 visit. Group claims by member_id + service_date.
+Same member + same date = one visit. Claims grouped by member_id + service_date.
 
-| Field | Aggregation Logic |
+| Field | Aggregation |
 |---|---|
-| provider_id | All qualifying providers on that date (in specialty scope) |
-| dx_list | All diagnosis codes — one dx per claim, collected across claims on that date |
+| provider_ids | All qualifying providers on that date |
+| specialty_codes | All specialties on that date |
+| dx_list | All diagnosis codes — one per claim, collected across claims |
 | procedure_codes | All procedure codes on that date |
-| gender | From claims — mode if conflicting across claims |
-| POS | Highest acuity if multiple on same date |
+| delta_t_bucket | Log-scale bucket of days since prior visit |
 
-### 4.3 Co-visit Handling
+### Co-visit Handling
 
-When multiple qualifying providers appear on the same date for the same member:
+Multiple qualifying providers on the same date for the same member: each provider embedded separately, vectors mean pooled into a single visit representation. HSTU sees one token per date — no duplicate timestamps.
 
-- Each provider is embedded separately into a 128-dim vector
-- Vectors are mean pooled into a single 128-dim provider representation for that visit
-- HSTU sees one token per date — no duplicate timestamps in the sequence
+Tradeoff: co-visit signal preserved but individual provider identity diluted. Accepted for Phase 1.
 
-Tradeoff: co-visit signal preserved but individual provider identity is diluted. Accepted for Phase 1. Revisit if provider-level prediction accuracy is poor.
+### Label Construction
 
-### 4.4 Member Profile Snapshot
-
-Built as of each visit date using only prior claims history. No imputation. Profile fills progressively as visits accumulate. Zero vector for cold start (no prior history before Visit 1).
-
-| Feature | Logic |
-|---|---|
-| Comorbidity flags | Rolling 12-month lookback. ICD codes grouped via CCSR or CCI grouper. Binary flag per condition category. |
-| Visit history features | Total visits, distinct specialties, distinct providers seen in last 12 months |
-| Member embedding input | 15,000-dim binary vector of all historical ICD codes as presence/absence flags |
-
-### 4.5 Label Construction
-
-Multi-label classification. Windows are cumulative — T+60 includes all visits within 60 days including those within T+30.
+Multi-label classification. Windows are cumulative.
 
 | Label | Logic |
 |---|---|
-| T+30 | Binary flag per specialty — did member visit this specialty within 30 days of visit date T |
-| T+60 | Cumulative — all specialties visited within 60 days of T |
-| T+180 | Cumulative — all specialties visited within 180 days of T |
+| T+30 | All specialties (or providers, or dx codes) visited within 30 days of anchor visit |
+| T+60 | Cumulative — all within 60 days |
+| T+180 | Cumulative — all within 180 days |
 
-### 4.6 Delta-T Bucketing
+Three targets trained separately: specialty, provider, dx. Sequence cache is shared across targets. Only label files differ per target.
 
-Days since last visit is log-scale bucketed using Meta's HSTU paper formula:
+### Delta-T Bucketing
+
+Log-scale bucketing per Meta's HSTU paper:
 
 ```
 bucket(delta_t) = floor( log(max(1, |delta_t|)) / 0.301 )
 ```
 
-Log scale provides finer granularity for recent gaps and coarser for distant gaps. The bucket integer is fed into HSTU's rating embedding layer as the time signal.
+Finer granularity for recent gaps, coarser for distant gaps. Bucket integer fed into HSTU's rating embedding layer as the time signal.
 
 ---
 
-## 5. Embeddings
+## EDA Plan
 
-| Embedding | Dim | Method | Dynamic? |
-|---|---|---|---|
-| Provider | 128 | Random walk on provider co-occurrence graph (Word2Vec style). Providers in similar member journeys are close in embedding space. | Yes — rolled by visit date |
-| Diagnosis (visit-level) | 64 | Random walk on ICD code co-occurrence graph. Codes co-occurring within member visits are close in space. Mean pooled across dx_list at visit time. | Per visit |
-| Member Profile | 128 | 15,000 binary ICD flags compressed via embedding layer trained end-to-end with model. | Yes — snapshot prior to each visit date |
-
-### 5.1 Final Visit Token
-
-```
-Provider embedding   ->  128-dim  (rolling by date)
-Member embedding     ->  128-dim  (snapshot prior to visit)
-Diagnosis embedding  ->   64-dim  (mean pool of dx_list codes)
-                     = 320-dim token per visit
-
-+ delta_t bucket     ->  scalar   -> HSTU rating embedding (separate)
-```
+| Method | Purpose |
+|---|---|
+| Markov Chain Transition Matrix | First-order specialty-to-specialty and dx-to-dx transition probabilities. Visualized as heatmap or network graph. Fast, interpretable, good for stakeholder presentation. |
+| Sequential Pattern Mining (PrefixSpan) | Identifies frequent multi-step referral chains. Example: Cardiology → Echo → Interventional Cardiology in X% of members with I25. Captures chains Markov misses. |
+| Co-occurrence Analysis | Top dx code pairs and triplets appearing within the same 30/60/180 day window. Surfaces condition clusters and referral triggers. |
+| Community Detection (Louvain) | Applied to provider co-occurrence graphs to surface provider clusters that co-refer. Maps informal referral networks not in formal agreements. |
+| Time-Segmented Analysis | Compare transition frequencies at 30, 60, 180 day windows. Demonstrates shorter windows have stronger signal — justifies prediction task design. |
 
 ---
 
-## 6. HSTU Architecture
+## Model Methodology
 
-### 6.1 Why HSTU
+### Algorithm Progression
+
+| Stage | Model | Purpose |
+|---|---|---|
+| Baseline | Logistic Regression / XGBoost | Visit-level features, no sequence modeling. Sets accuracy floor. Expected hit@5: 25–35%. |
+| Stage 2 | SASRec | Self-attention sequential model. Captures visit order. Faster than transformer models. |
+| Stage 3 | BERT4Rec | Bidirectional transformer. Stronger on longer sequences. Appropriate for episode-bounded sequences in Phase 2. |
+| Stage 4 | HSTU | Explicit temporal gap encoding. Primary model. |
+
+---
+
+### HSTU — Model Design
+
+#### Why HSTU
 
 | Criterion | HSTU | SASRec |
 |---|---|---|
-| Irregular time gaps | Native time encoding | Not handled natively |
-| Feature interaction | Explicit gating — U(X) mechanism | No explicit interaction layer |
+| Irregular time gaps | Native delta_t encoding | Not handled natively |
+| Feature interaction | Explicit gating via U(X) mechanism | No interaction layer |
 | Attention normalization | Per-element SiLU | Row-wise softmax |
-| Availability | GitHub only — no PyPI | pip installable via RecBole |
 
-### 6.2 Four HSTU Components
-
-**Component 1: Time Encoding**  
-delta_t bucket fed into learned embedding. Produces a time vector that modulates how much attention each past visit receives. Recent visits weighted higher.
-
-**Component 2: Time-Modulated Self Attention**  
-Every token attends to every other token in sequence. Attention scores multiplied by time decay weight. Model learns the decay function from data — a CAD diagnosis 6 months ago may still receive high attention if clinically relevant.
-
-**Component 3: Feature Interaction**  
-Within each 320-dim token, learned cross-interactions between provider, member, and diagnosis components via elementwise gating (U(X) mechanism). This is where the business question lives: Provider John + Diagnosis XYZ + Member Profile produces a specific interaction signal different from any other provider seeing the same diagnosis.
-
-**Component 4: Prediction Heads**
-
-```
-Shared HSTU Backbone (320-dim context vector)
-|-- Head T+30  -> sigmoid -> binary vector over specialties
-|-- Head T+60  -> sigmoid -> binary vector over specialties
-'-- Head T+180 -> sigmoid -> binary vector over specialties
-```
-
-Sigmoid not softmax — multiple specialties can be true simultaneously.  
-Loss = BCE(T+30) + BCE(T+60) + BCE(T+180)
-
-### 6.3 HSTU Configuration
-
-| Parameter | Value | Notes |
-|---|---|---|
-| max_sequence_len | 20 | Cap member history at last 20 visits |
-| embedding_dim | 320 | Token dimension |
-| num_blocks | 2 | HSTU layers — start conservative |
-| num_heads | 4 | Attention heads |
-| linear_dim | 128 | Feedforward layer size |
-| attention_dim | 64 | Attention projection |
-| dropout_rate | 0.2 | Both linear and attention dropout |
-| rating_embedding_dim | 32 | delta_t bucket embedding size |
-| enable_relative_attention_bias | True | Critical for temporal encoding |
-
-### 6.4 SequentialFeatures Input
-
-Data structure mapping our healthcare concepts to Meta's HSTU SequentialFeatures NamedTuple:
-
-| Their Field | Their Concept | Our Concept |
-|---|---|---|
-| past_lengths | Sequence length per user | Number of visits per member |
-| past_ids | Item IDs | provider_ids |
-| past_embeddings | Item embeddings (None in their code) | Our precomputed 320-dim visit tokens |
-| past_payloads['timestamps'] | Unix timestamps | Visit dates as unix timestamps |
-| past_payloads['ratings'] | Star ratings | Log-scale bucketed delta_t |
-
-```python
-features = SequentialFeatures(
-    past_lengths    = member_visit_counts,   # [B] int64
-    past_ids        = provider_ids,          # [B, N] int64
-    past_embeddings = visit_tokens,          # [B, N, 320] float
-    past_payloads   = {
-        'timestamps': visit_timestamps,      # [B, N] unix timestamps
-        'ratings':    delta_t_buckets        # [B, N] log-scale buckets
-    }
-)
-```
+Standard recommendation models treat sequences as ordered but do not encode time between events. In healthcare referral prediction, *when* a visit occurred relative to the prior visit is as clinically meaningful as *what* the visit was — a CAD diagnosis 6 months ago carries different weight than the same diagnosis 2 weeks ago. HSTU captures this natively.
 
 ---
 
-## 7. Training Strategy
+#### Embeddings
+
+Four modalities embedded via SVD on co-occurrence graphs. Each modality produces a 32-dim vector. Mean pooled per visit across all codes in that modality.
+
+| Modality | Dim | Graph | Notes |
+|---|---|---|---|
+| Provider | 32 | Provider co-occurrence — providers appearing in same member journey | Mean pool across co-visiting providers |
+| Specialty | 32 | Specialty co-occurrence graph | Mean pool across specialties on visit date |
+| Diagnosis | 32 | ICD code co-occurrence within member visits | Mean pool across dx_list |
+| Procedure | 32 | Procedure co-occurrence within member visits | Mean pool across procedure_codes |
+
+```
+Provider embedding    →  32-dim
+Specialty embedding   →  32-dim
+Diagnosis embedding   →  32-dim
+Procedure embedding   →  32-dim
+                      = 128-dim visit token
+
++ delta_t bucket      →  scalar  →  HSTU rating embedding (32-dim, separate)
+```
+
+Total HSTU input dimension: 160 (128 visit token + 32 delta_t embedding).
+
+**Phase 2 extension — Member Profile:**
+A member snapshot embedding (128-dim) built from historical ICD code presence/absence, trained end-to-end with the model, will extend the visit token to 256-dim. Not in current implementation.
+
+---
+
+#### HSTU Configuration
+
+| Parameter | Value | Notes |
+|---|---|---|
+| max_sequence_len | 20 | Last 20 visits per member |
+| embedding_dim | 128 | Visit token dimension (4 × 32) |
+| hstu_dim | 160 | 128 + 32 delta_t |
+| num_blocks | 2 | HSTU layers |
+| num_heads | 4 | Attention heads |
+| linear_dim | 128 | Feedforward layer size |
+| attention_dim | 64 | Attention projection |
+| dropout_rate | 0.2 | Applied to linear and attention layers |
+| rating_embedding_dim | 32 | delta_t bucket embedding size |
+| num_ratings | 16 | Number of delta_t buckets |
+
+---
+
+#### HSTU Components
+
+**Component 1 — Time Encoding**
+delta_t bucket fed into a learned embedding. Produces a time vector that modulates attention weight. Recent visits weighted higher by default; model learns the decay function from data.
+
+**Component 2 — Time-Modulated Self Attention**
+Every token attends to every other token in the sequence. Attention scores multiplied by time decay weight. Clinically relevant — a diagnosis from 6 months ago may still receive high attention if it predicts a known delayed referral pattern.
+
+**Component 3 — Feature Interaction**
+Within each visit token, learned cross-interactions between provider, specialty, diagnosis, and procedure components via elementwise gating (U(X) mechanism). This is where the core business question lives: Provider John + Diagnosis XYZ produces a specific interaction signal different from any other provider seeing the same diagnosis.
+
+**Component 4 — Prediction Heads**
+
+```
+Shared HSTU Backbone (128-dim context vector)
+|-- Head T+30   →  sigmoid  →  binary vector over label space
+|-- Head T+60   →  sigmoid  →  binary vector over label space
+'-- Head T+180  →  sigmoid  →  binary vector over label space
+```
+
+Sigmoid not softmax — multiple labels can be true simultaneously.
+Loss = BCE(T+30) + BCE(T+60) + BCE(T+180)
+
+---
+
+#### SequentialFeatures Input
+
+Mapping healthcare concepts to HSTU's SequentialFeatures NamedTuple:
+
+| HSTU Field | Our Concept |
+|---|---|
+| past_lengths | Number of visits per member |
+| past_ids | provider_ids |
+| past_embeddings | Precomputed 128-dim visit tokens |
+| past_payloads['timestamps'] | Visit dates as unix timestamps |
+| past_payloads['ratings'] | Log-scale bucketed delta_t |
+
+---
+
+### Training Strategy
 
 | Decision | Choice | Reason |
 |---|---|---|
-| Data split | Time-based (not random) | Prevents future data leakage into training |
-| Train | Months 1-18 of 24-month window | |
-| Validation | Months 19-21 | |
-| Test | Months 22-24 | |
-| Class imbalance | Weighted BCE — inverse frequency per specialty | Prevents model from predicting only common specialties |
-| Sequence cap | Last 20 visits per member | VRAM constraint on 2x T4 |
-| Precision | FP16 (half precision) | Cuts VRAM in half |
-| Batch size | 64-128 sequences | T4 VRAM limit |
+| Data split | Time-based | Prevents future data leakage |
+| Train | Months 1–18 of 24-month window | |
+| Validation | Months 19–21 | |
+| Test | Months 22–24 | |
+| Class imbalance | Weighted BCE — inverse frequency per label | Prevents prediction of only common specialties |
+| Sequence cap | Last 20 visits | VRAM constraint |
+| Precision | FP16 | Cuts VRAM in half |
+| Batch size | 512 | Tuned for 2× T4 |
 | Early stopping | 5 epochs no val F1 improvement | |
 | First run | 10% member sample | Validate architecture before full training |
 
 ---
 
-## 8. Validation
-
-### 8.1 Metrics
+### Validation
 
 | Metric | What It Measures |
 |---|---|
-| Precision@K | Of top K predicted specialties — how many actually occurred |
-| Recall@K | Of actual specialties visited — how many did model predict |
+| Precision@K | Of top K predicted labels — how many actually occurred |
+| Recall@K | Of actual labels — how many did the model predict |
 | F1@K | Balance of precision and recall |
-| Hit Rate | Did model predict at least one correct specialty |
+| Hit Rate@K | Did model predict at least one correct label in top K |
 
-Evaluate separately for T+30, T+60, T+180. T+30 hardest, T+180 easiest. Holdout = last N visits per member.
+Evaluated separately for T+30, T+60, T+180. T+30 is the hardest window, T+180 the easiest.
 
-### 8.2 Clinical Validation
-
-Have network team or clinician review top 20-30 prediction examples for clinical coherence. Example: PCP visit with hypertension + newly flagged diabetes should predict Endocrinology and Cardiology within 180 days.
+**Clinical Validation:**
+Network team or clinical SME reviews top 20–30 prediction examples for coherence. Example: PCP visit with hypertension + newly flagged diabetes should predict Endocrinology and Cardiology within 180 days.
 
 ---
 
-## 9. Infrastructure
+## Infrastructure
 
 | Component | Detail |
 |---|---|
-| GPU | 2x Nvidia T4 (16GB VRAM each, 32GB total) |
-| HSTU source | github.com/facebookresearch/generative-recommenders — cloned locally with submodules |
-| Install | git clone --recurse-submodules + pip install -e ./generative-recommenders |
-| Import path | from generative_recommenders.research.modeling.sequential.hstu import HSTU |
-| sys.path fix | sys.path.insert(0, './generative-recommenders') required |
-| PyTorch version | 2.10.0 — conflicts with repo expected 1.13.1. Monitor for runtime errors. |
-| CUDA version | 12.9.4 — conflicts with repo expected 11.8.x. Monitor for runtime errors. |
-| Data scale | ~300M claim rows -> ~30-50M visits -> ~5-10M member sequences |
+| GPU | 2× Nvidia T4 (16GB VRAM each, 32GB total) |
+| HSTU source | github.com/facebookresearch/generative-recommenders |
+| PyTorch | 2.10.0 — repo expects 1.13.1, monitor for runtime errors |
+| CUDA | 12.9.4 — repo expects 11.8.x, monitor for runtime errors |
+| Data scale | ~300M claims → ~30–50M visits → ~5–10M member sequences → ~33M rows after recency_rank <= 20 filter |
+| BQ project | anbc-hcb-dev |
+| BQ dataset | provider_ds_netconf_data_hcb_dev |
 
 ---
 
-## 10. Open Questions and Next Steps
+## Next Steps
 
-- Write data preparation code: claims -> visit table -> member snapshots -> SequentialFeatures
-- Train provider embeddings via random walk on provider co-occurrence graph
-- Train diagnosis embeddings via random walk on ICD code co-occurrence graph
-- Inspect output_postproc_module options from output_preprocessors.py
-- Wire embedding_module, similarity_module, output_postproc_module for HSTU init
-- Run small-scale training on 10% sample — validate predictions clinically
-- Evaluate whether co-visit mean pooling degrades provider-level prediction accuracy
-- If degraded — revisit primary provider wins approach as fallback
+1. Align on starting specialty with manager and clinical SME
+2. Finalize first visit definition — Option A for Phase 1
+3. Run EDA on scoped cohort — Markov transitions and co-occurrence as deliverables
+4. Establish baseline accuracy with logistic regression before presenting HSTU results
+5. Define accuracy targets for Phase 1 sign-off — recommended hit@5 > 40% on specialty prediction
+6. Evaluate co-visit mean pooling impact on provider-level prediction accuracy
+7. If provider accuracy degrades — evaluate primary provider wins as fallback
