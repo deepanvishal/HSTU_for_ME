@@ -23,3 +23,21 @@ SELECT
     ROUND(SUM(CASE WHEN matched = 1 THEN claim_count ELSE 0 END) * 100.0 
           / SUM(claim_count), 2)                                                AS match_rate_pct
 FROM matched
+
+
+
+SELECT 
+    d.diagnosis_code,
+    COUNT(*) AS claim_count
+FROM (
+    SELECT pri_icd9_dx_ccd AS diagnosis_code
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_2022_2025_sfl`
+    WHERE srv_start_dt BETWEEN '2023-01-01' AND '2025-12-31'
+        AND pri_icd9_dx_ccd IS NOT NULL
+) d
+LEFT JOIN `edp-prod-hcbstorage.edp_hcb_mw_bh_analytics_cnsv.AHRQ_CCSR_DX_20260101` c
+    ON REPLACE(d.diagnosis_code, '.', '') = c.icd_10_cm_code
+WHERE c.icd_10_cm_code IS NULL
+GROUP BY d.diagnosis_code
+ORDER BY claim_count DESC
+LIMIT 50
