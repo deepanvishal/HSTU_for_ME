@@ -1,120 +1,65 @@
 -- ============================================================
--- ORDER 1: DX -> Specialty
+-- ORDER 1: DX -> SPECIALTY
 -- ============================================================
 DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_dx_to_specialty_order1`;
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_dx_to_specialty_order1`
-OPTIONS (
-    labels=[("owner", "deepan_thulasi_aetna_com")]
-)
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
-WITH visit_spine AS (
+WITH next_claims AS (
     SELECT DISTINCT
-        member_id
-        ,visit_date
-        ,DENSE_RANK() OVER (
-            PARTITION BY member_id
-            ORDER BY visit_date
-        )                                                AS visit_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-),
-triggers AS (
-    SELECT DISTINCT
-        f.member_id
-        ,f.visit_date                                    AS trigger_date
-        ,f.dx_raw                                        AS trigger_dx
-        ,f.dx_clean                                      AS trigger_dx_clean
-        ,CASE
-            WHEN f.age_nbr < 18                          THEN 'Children'
-            WHEN f.age_nbr BETWEEN 18 AND 65
-                 AND f.gender_cd = 'M'                   THEN 'Adult_Male'
-            WHEN f.age_nbr BETWEEN 18 AND 65
-                 AND f.gender_cd = 'F'                   THEN 'Adult_Female'
-            WHEN f.age_nbr > 65                          THEN 'Senior'
-         END                                             AS member_segment
-        ,s.visit_rank                                    AS trigger_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-    JOIN visit_spine s
-        ON f.member_id = s.member_id
-        AND f.visit_date = s.visit_date
-    WHERE f.is_first_dx_encounter = TRUE
-),
-next_visits AS (
-    SELECT
-        t.member_id
-        ,t.trigger_date
-        ,t.trigger_dx
-        ,t.trigger_dx_clean
+        t.member_id, t.trigger_date, t.trigger_dx, t.trigger_dx_clean
+        ,t.trigger_dx_desc, t.trigger_ccsr, t.trigger_ccsr_desc
         ,t.member_segment
-        ,v2.visit_date                                   AS next_visit_date
-    FROM triggers t
-    JOIN visit_spine v2
+        ,f.specialty_ctg_cd                              AS next_specialty
+        ,sp.long_dscrptn                                 AS next_specialty_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers` t
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine` v2
         ON t.member_id = v2.member_id
         AND v2.visit_rank = t.trigger_rank + 1
-),
-next_claims AS (
-    SELECT DISTINCT
-        n.member_id
-        ,n.trigger_date
-        ,n.trigger_dx
-        ,n.trigger_dx_clean
-        ,n.member_segment
-        ,f.specialty_ctg_cd                              AS next_specialty
-    FROM next_visits n
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-        ON n.member_id = f.member_id
-        AND n.next_visit_date = f.visit_date
+        ON t.member_id = f.member_id
+        AND v2.visit_date = f.visit_date
+    LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp
+        ON f.specialty_ctg_cd = sp.global_lookup_cd
+        AND LOWER(sp.lookup_column_nm) = 'specialty_ctg_cd'
     WHERE f.specialty_ctg_cd IS NOT NULL
 ),
 transition_counts AS (
     SELECT
-        trigger_dx
-        ,trigger_dx_clean
-        ,next_specialty
+        trigger_dx, trigger_dx_clean, trigger_dx_desc
+        ,trigger_ccsr, trigger_ccsr_desc
+        ,next_specialty, next_specialty_desc
         ,member_segment
         ,COUNT(*)                                        AS transition_count
         ,COUNT(DISTINCT member_id)                       AS unique_members
     FROM next_claims
-    GROUP BY trigger_dx, trigger_dx_clean, next_specialty, member_segment
+    GROUP BY
+        trigger_dx, trigger_dx_clean, trigger_dx_desc
+        ,trigger_ccsr, trigger_ccsr_desc
+        ,next_specialty, next_specialty_desc
+        ,member_segment
 ),
 dx_totals AS (
-    SELECT
-        trigger_dx
-        ,member_segment
-        ,SUM(transition_count)                           AS dx_total
-    FROM transition_counts
-    GROUP BY trigger_dx, member_segment
+    SELECT trigger_dx, member_segment, SUM(transition_count) AS dx_total
+    FROM transition_counts GROUP BY trigger_dx, member_segment
 )
 SELECT
     t.trigger_dx                                         AS current_dx
-    ,dx_desc.icd9_dx_dscrptn                             AS current_dx_desc
-    ,trigger_ccsr.ccsr_category                          AS current_ccsr
-    ,trigger_ccsr.ccsr_category_description              AS current_ccsr_desc
-    ,t.next_specialty
-    ,sp.long_dscrptn                                     AS next_specialty_desc
-    ,t.member_segment
-    ,t.transition_count
-    ,t.unique_members
-    ,d.dx_total
-    ,ROUND(t.transition_count / d.dx_total, 4)          AS conditional_probability
+    ,t.trigger_dx_desc                                   AS current_dx_desc
+    ,t.trigger_ccsr                                      AS current_ccsr
+    ,t.trigger_ccsr_desc                                 AS current_ccsr_desc
+    ,t.next_specialty, t.next_specialty_desc
+    ,t.member_segment, t.transition_count, t.unique_members, d.dx_total
+    ,ROUND(t.transition_count / d.dx_total, 4)           AS conditional_probability
     ,ROUND(-SUM(t.transition_count / d.dx_total *
         LOG(t.transition_count / d.dx_total)) OVER (
             PARTITION BY t.trigger_dx, t.member_segment
         ), 4)                                            AS conditional_entropy
 FROM transition_counts t
-JOIN dx_totals d
-    ON t.trigger_dx = d.trigger_dx
-    AND t.member_segment = d.member_segment
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` dx_desc
-    ON t.trigger_dx = dx_desc.icd9_dx_cd
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_mwb_bh_analytics_cnsv.AHRQ_CCSR_DX_20260101` trigger_ccsr
-    ON t.trigger_dx_clean = trigger_ccsr.icd_10_cm_code
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp
-    ON t.next_specialty = sp.global_lookup_cd
-    AND LOWER(sp.lookup_column_nm) = 'specialty_ctg_cd'
-ORDER BY
-    t.trigger_dx
-    ,t.transition_count DESC
-;
+JOIN dx_totals d ON t.trigger_dx = d.trigger_dx AND t.member_segment = d.member_segment
+ORDER BY t.trigger_dx, t.transition_count DESC;
+
+
 -- ============================================================
 -- ORDER 1: DX -> DX
 -- ============================================================
@@ -122,61 +67,60 @@ DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_dx_to_dx_order1`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
-WITH visit_spine AS (
-    SELECT DISTINCT member_id, visit_date
-        ,DENSE_RANK() OVER (PARTITION BY member_id ORDER BY visit_date) AS visit_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-),
-triggers AS (
-    SELECT DISTINCT f.member_id, f.visit_date AS trigger_date
-        ,f.dx_raw AS trigger_dx, f.dx_clean AS trigger_dx_clean
-        ,CASE
-            WHEN f.age_nbr < 18 THEN 'Children'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'M' THEN 'Adult_Male'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'F' THEN 'Adult_Female'
-            WHEN f.age_nbr > 65 THEN 'Senior'
-         END AS member_segment
-        ,s.visit_rank AS trigger_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-    JOIN visit_spine s ON f.member_id = s.member_id AND f.visit_date = s.visit_date
-    WHERE f.is_first_dx_encounter = TRUE
-),
-next_claims AS (
-    SELECT DISTINCT t.member_id, t.trigger_date, t.trigger_dx, t.trigger_dx_clean
-        ,t.member_segment, f.dx_raw AS next_dx, f.dx_clean AS next_dx_clean
-    FROM triggers t
-    JOIN visit_spine v2 ON t.member_id = v2.member_id AND v2.visit_rank = t.trigger_rank + 1
+WITH next_claims AS (
+    SELECT DISTINCT
+        t.member_id, t.trigger_date, t.trigger_dx, t.trigger_dx_clean
+        ,t.trigger_dx_desc, t.trigger_ccsr, t.trigger_ccsr_desc
+        ,t.member_segment
+        ,f.dx_raw                                        AS next_dx
+        ,f.dx_clean                                      AS next_dx_clean
+        ,dx_desc.icd9_dx_dscrptn                         AS next_dx_desc
+        ,f.ccsr_category                                 AS next_ccsr
+        ,f.ccsr_category_description                     AS next_ccsr_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers` t
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine` v2
+        ON t.member_id = v2.member_id
+        AND v2.visit_rank = t.trigger_rank + 1
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-        ON t.member_id = f.member_id AND v2.visit_date = f.visit_date
+        ON t.member_id = f.member_id
+        AND v2.visit_date = f.visit_date
+    LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` dx_desc
+        ON f.dx_raw = dx_desc.icd9_dx_cd
     WHERE f.dx_raw IS NOT NULL
 ),
 transition_counts AS (
-    SELECT trigger_dx, trigger_dx_clean, next_dx, next_dx_clean, member_segment
-        ,COUNT(*) AS transition_count, COUNT(DISTINCT member_id) AS unique_members
+    SELECT
+        trigger_dx, trigger_dx_clean, trigger_dx_desc
+        ,trigger_ccsr, trigger_ccsr_desc
+        ,next_dx, next_dx_clean, next_dx_desc, next_ccsr, next_ccsr_desc
+        ,member_segment
+        ,COUNT(*)                                        AS transition_count
+        ,COUNT(DISTINCT member_id)                       AS unique_members
     FROM next_claims
-    GROUP BY trigger_dx, trigger_dx_clean, next_dx, next_dx_clean, member_segment
+    GROUP BY
+        trigger_dx, trigger_dx_clean, trigger_dx_desc
+        ,trigger_ccsr, trigger_ccsr_desc
+        ,next_dx, next_dx_clean, next_dx_desc, next_ccsr, next_ccsr_desc
+        ,member_segment
 ),
 dx_totals AS (
     SELECT trigger_dx, member_segment, SUM(transition_count) AS dx_total
     FROM transition_counts GROUP BY trigger_dx, member_segment
 )
 SELECT
-    t.trigger_dx AS current_dx, dx_desc.icd9_dx_dscrptn AS current_dx_desc
-    ,trigger_ccsr.ccsr_category AS current_ccsr
-    ,trigger_ccsr.ccsr_category_description AS current_ccsr_desc
-    ,t.next_dx, next_dx_desc.icd9_dx_dscrptn AS next_dx_desc
-    ,next_ccsr.ccsr_category AS next_ccsr
-    ,next_ccsr.ccsr_category_description AS next_ccsr_desc
+    t.trigger_dx                                         AS current_dx
+    ,t.trigger_dx_desc                                   AS current_dx_desc
+    ,t.trigger_ccsr                                      AS current_ccsr
+    ,t.trigger_ccsr_desc                                 AS current_ccsr_desc
+    ,t.next_dx, t.next_dx_desc, t.next_ccsr, t.next_ccsr_desc
     ,t.member_segment, t.transition_count, t.unique_members, d.dx_total
-    ,ROUND(t.transition_count / d.dx_total, 4) AS conditional_probability
-    ,ROUND(-SUM(t.transition_count / d.dx_total * LOG(t.transition_count / d.dx_total))
-        OVER (PARTITION BY t.trigger_dx, t.member_segment), 4) AS conditional_entropy
+    ,ROUND(t.transition_count / d.dx_total, 4)           AS conditional_probability
+    ,ROUND(-SUM(t.transition_count / d.dx_total *
+        LOG(t.transition_count / d.dx_total)) OVER (
+            PARTITION BY t.trigger_dx, t.member_segment
+        ), 4)                                            AS conditional_entropy
 FROM transition_counts t
 JOIN dx_totals d ON t.trigger_dx = d.trigger_dx AND t.member_segment = d.member_segment
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` dx_desc ON t.trigger_dx = dx_desc.icd9_dx_cd
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_mwb_bh_analytics_cnsv.AHRQ_CCSR_DX_20260101` trigger_ccsr ON t.trigger_dx_clean = trigger_ccsr.icd_10_cm_code
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` next_dx_desc ON t.next_dx = next_dx_desc.icd9_dx_cd
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_mwb_bh_analytics_cnsv.AHRQ_CCSR_DX_20260101` next_ccsr ON t.next_dx_clean = next_ccsr.icd_10_cm_code
 ORDER BY t.trigger_dx, t.transition_count DESC;
 
 
@@ -187,57 +131,54 @@ DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_dx_to_ccsr_order1`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
-WITH visit_spine AS (
-    SELECT DISTINCT member_id, visit_date
-        ,DENSE_RANK() OVER (PARTITION BY member_id ORDER BY visit_date) AS visit_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-),
-triggers AS (
-    SELECT DISTINCT f.member_id, f.visit_date AS trigger_date
-        ,f.dx_raw AS trigger_dx, f.dx_clean AS trigger_dx_clean
-        ,CASE
-            WHEN f.age_nbr < 18 THEN 'Children'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'M' THEN 'Adult_Male'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'F' THEN 'Adult_Female'
-            WHEN f.age_nbr > 65 THEN 'Senior'
-         END AS member_segment
-        ,s.visit_rank AS trigger_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-    JOIN visit_spine s ON f.member_id = s.member_id AND f.visit_date = s.visit_date
-    WHERE f.is_first_dx_encounter = TRUE
-),
-next_claims AS (
-    SELECT DISTINCT t.member_id, t.trigger_date, t.trigger_dx, t.trigger_dx_clean
-        ,t.member_segment, f.ccsr_category AS next_ccsr, f.ccsr_category_description AS next_ccsr_desc
-    FROM triggers t
-    JOIN visit_spine v2 ON t.member_id = v2.member_id AND v2.visit_rank = t.trigger_rank + 1
+WITH next_claims AS (
+    SELECT DISTINCT
+        t.member_id, t.trigger_date, t.trigger_dx, t.trigger_dx_clean
+        ,t.trigger_dx_desc, t.trigger_ccsr, t.trigger_ccsr_desc
+        ,t.member_segment
+        ,f.ccsr_category                                 AS next_ccsr
+        ,f.ccsr_category_description                     AS next_ccsr_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers` t
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine` v2
+        ON t.member_id = v2.member_id
+        AND v2.visit_rank = t.trigger_rank + 1
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-        ON t.member_id = f.member_id AND v2.visit_date = f.visit_date
+        ON t.member_id = f.member_id
+        AND v2.visit_date = f.visit_date
     WHERE f.ccsr_category IS NOT NULL
 ),
 transition_counts AS (
-    SELECT trigger_dx, trigger_dx_clean, next_ccsr, next_ccsr_desc, member_segment
-        ,COUNT(*) AS transition_count, COUNT(DISTINCT member_id) AS unique_members
+    SELECT
+        trigger_dx, trigger_dx_clean, trigger_dx_desc
+        ,trigger_ccsr, trigger_ccsr_desc
+        ,next_ccsr, next_ccsr_desc
+        ,member_segment
+        ,COUNT(*)                                        AS transition_count
+        ,COUNT(DISTINCT member_id)                       AS unique_members
     FROM next_claims
-    GROUP BY trigger_dx, trigger_dx_clean, next_ccsr, next_ccsr_desc, member_segment
+    GROUP BY
+        trigger_dx, trigger_dx_clean, trigger_dx_desc
+        ,trigger_ccsr, trigger_ccsr_desc
+        ,next_ccsr, next_ccsr_desc, member_segment
 ),
 dx_totals AS (
     SELECT trigger_dx, member_segment, SUM(transition_count) AS dx_total
     FROM transition_counts GROUP BY trigger_dx, member_segment
 )
 SELECT
-    t.trigger_dx AS current_dx, dx_desc.icd9_dx_dscrptn AS current_dx_desc
-    ,trigger_ccsr.ccsr_category AS current_ccsr
-    ,trigger_ccsr.ccsr_category_description AS current_ccsr_desc
+    t.trigger_dx                                         AS current_dx
+    ,t.trigger_dx_desc                                   AS current_dx_desc
+    ,t.trigger_ccsr                                      AS current_ccsr
+    ,t.trigger_ccsr_desc                                 AS current_ccsr_desc
     ,t.next_ccsr, t.next_ccsr_desc
     ,t.member_segment, t.transition_count, t.unique_members, d.dx_total
-    ,ROUND(t.transition_count / d.dx_total, 4) AS conditional_probability
-    ,ROUND(-SUM(t.transition_count / d.dx_total * LOG(t.transition_count / d.dx_total))
-        OVER (PARTITION BY t.trigger_dx, t.member_segment), 4) AS conditional_entropy
+    ,ROUND(t.transition_count / d.dx_total, 4)           AS conditional_probability
+    ,ROUND(-SUM(t.transition_count / d.dx_total *
+        LOG(t.transition_count / d.dx_total)) OVER (
+            PARTITION BY t.trigger_dx, t.member_segment
+        ), 4)                                            AS conditional_entropy
 FROM transition_counts t
 JOIN dx_totals d ON t.trigger_dx = d.trigger_dx AND t.member_segment = d.member_segment
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` dx_desc ON t.trigger_dx = dx_desc.icd9_dx_cd
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_mwb_bh_analytics_cnsv.AHRQ_CCSR_DX_20260101` trigger_ccsr ON t.trigger_dx_clean = trigger_ccsr.icd_10_cm_code
 ORDER BY t.trigger_dx, t.transition_count DESC;
 
 
@@ -248,58 +189,50 @@ DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_specialty_to_specialty_order1`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
-WITH visit_spine AS (
-    SELECT DISTINCT member_id, visit_date
-        ,DENSE_RANK() OVER (PARTITION BY member_id ORDER BY visit_date) AS visit_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-),
-triggers AS (
-    SELECT DISTINCT f.member_id, f.visit_date AS trigger_date
-        ,f.specialty_ctg_cd AS trigger_specialty
-        ,CASE
-            WHEN f.age_nbr < 18 THEN 'Children'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'M' THEN 'Adult_Male'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'F' THEN 'Adult_Female'
-            WHEN f.age_nbr > 65 THEN 'Senior'
-         END AS member_segment
-        ,s.visit_rank AS trigger_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-    JOIN visit_spine s ON f.member_id = s.member_id AND f.visit_date = s.visit_date
-    WHERE f.is_first_dx_encounter = TRUE
-),
-next_claims AS (
-    SELECT DISTINCT t.member_id, t.trigger_date, t.trigger_specialty
-        ,t.member_segment, f.specialty_ctg_cd AS next_specialty
-    FROM triggers t
-    JOIN visit_spine v2 ON t.member_id = v2.member_id AND v2.visit_rank = t.trigger_rank + 1
+WITH next_claims AS (
+    SELECT DISTINCT
+        t.member_id, t.trigger_date, t.trigger_specialty, t.trigger_specialty_desc
+        ,t.member_segment
+        ,f.specialty_ctg_cd                              AS next_specialty
+        ,sp.long_dscrptn                                 AS next_specialty_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers` t
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine` v2
+        ON t.member_id = v2.member_id
+        AND v2.visit_rank = t.trigger_rank + 1
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-        ON t.member_id = f.member_id AND v2.visit_date = f.visit_date
+        ON t.member_id = f.member_id
+        AND v2.visit_date = f.visit_date
+    LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp
+        ON f.specialty_ctg_cd = sp.global_lookup_cd
+        AND LOWER(sp.lookup_column_nm) = 'specialty_ctg_cd'
     WHERE f.specialty_ctg_cd IS NOT NULL
+        AND t.trigger_specialty IS NOT NULL
 ),
 transition_counts AS (
-    SELECT trigger_specialty, next_specialty, member_segment
-        ,COUNT(*) AS transition_count, COUNT(DISTINCT member_id) AS unique_members
+    SELECT
+        trigger_specialty, trigger_specialty_desc
+        ,next_specialty, next_specialty_desc, member_segment
+        ,COUNT(*)                                        AS transition_count
+        ,COUNT(DISTINCT member_id)                       AS unique_members
     FROM next_claims
-    GROUP BY trigger_specialty, next_specialty, member_segment
+    GROUP BY trigger_specialty, trigger_specialty_desc, next_specialty, next_specialty_desc, member_segment
 ),
 specialty_totals AS (
     SELECT trigger_specialty, member_segment, SUM(transition_count) AS specialty_total
     FROM transition_counts GROUP BY trigger_specialty, member_segment
 )
 SELECT
-    t.trigger_specialty AS current_specialty
-    ,sp1.long_dscrptn AS current_specialty_desc
-    ,t.next_specialty, sp2.long_dscrptn AS next_specialty_desc
+    t.trigger_specialty                                  AS current_specialty
+    ,t.trigger_specialty_desc                            AS current_specialty_desc
+    ,t.next_specialty, t.next_specialty_desc
     ,t.member_segment, t.transition_count, t.unique_members, s.specialty_total
-    ,ROUND(t.transition_count / s.specialty_total, 4) AS conditional_probability
-    ,ROUND(-SUM(t.transition_count / s.specialty_total * LOG(t.transition_count / s.specialty_total))
-        OVER (PARTITION BY t.trigger_specialty, t.member_segment), 4) AS conditional_entropy
+    ,ROUND(t.transition_count / s.specialty_total, 4)    AS conditional_probability
+    ,ROUND(-SUM(t.transition_count / s.specialty_total *
+        LOG(t.transition_count / s.specialty_total)) OVER (
+            PARTITION BY t.trigger_specialty, t.member_segment
+        ), 4)                                            AS conditional_entropy
 FROM transition_counts t
 JOIN specialty_totals s ON t.trigger_specialty = s.trigger_specialty AND t.member_segment = s.member_segment
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp1
-    ON t.trigger_specialty = sp1.global_lookup_cd AND LOWER(sp1.lookup_column_nm) = 'specialty_ctg_cd'
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp2
-    ON t.next_specialty = sp2.global_lookup_cd AND LOWER(sp2.lookup_column_nm) = 'specialty_ctg_cd'
 ORDER BY t.trigger_specialty, t.transition_count DESC;
 
 
@@ -310,59 +243,56 @@ DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_specialty_to_dx_order1`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
-WITH visit_spine AS (
-    SELECT DISTINCT member_id, visit_date
-        ,DENSE_RANK() OVER (PARTITION BY member_id ORDER BY visit_date) AS visit_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-),
-triggers AS (
-    SELECT DISTINCT f.member_id, f.visit_date AS trigger_date
-        ,f.specialty_ctg_cd AS trigger_specialty
-        ,CASE
-            WHEN f.age_nbr < 18 THEN 'Children'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'M' THEN 'Adult_Male'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'F' THEN 'Adult_Female'
-            WHEN f.age_nbr > 65 THEN 'Senior'
-         END AS member_segment
-        ,s.visit_rank AS trigger_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-    JOIN visit_spine s ON f.member_id = s.member_id AND f.visit_date = s.visit_date
-    WHERE f.is_first_dx_encounter = TRUE
-),
-next_claims AS (
-    SELECT DISTINCT t.member_id, t.trigger_date, t.trigger_specialty
-        ,t.member_segment, f.dx_raw AS next_dx, f.dx_clean AS next_dx_clean
-    FROM triggers t
-    JOIN visit_spine v2 ON t.member_id = v2.member_id AND v2.visit_rank = t.trigger_rank + 1
+WITH next_claims AS (
+    SELECT DISTINCT
+        t.member_id, t.trigger_date, t.trigger_specialty, t.trigger_specialty_desc
+        ,t.member_segment
+        ,f.dx_raw                                        AS next_dx
+        ,f.dx_clean                                      AS next_dx_clean
+        ,dx_desc.icd9_dx_dscrptn                         AS next_dx_desc
+        ,f.ccsr_category                                 AS next_ccsr
+        ,f.ccsr_category_description                     AS next_ccsr_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers` t
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine` v2
+        ON t.member_id = v2.member_id
+        AND v2.visit_rank = t.trigger_rank + 1
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-        ON t.member_id = f.member_id AND v2.visit_date = f.visit_date
+        ON t.member_id = f.member_id
+        AND v2.visit_date = f.visit_date
+    LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` dx_desc
+        ON f.dx_raw = dx_desc.icd9_dx_cd
     WHERE f.dx_raw IS NOT NULL
+        AND t.trigger_specialty IS NOT NULL
 ),
 transition_counts AS (
-    SELECT trigger_specialty, next_dx, next_dx_clean, member_segment
-        ,COUNT(*) AS transition_count, COUNT(DISTINCT member_id) AS unique_members
+    SELECT
+        trigger_specialty, trigger_specialty_desc
+        ,next_dx, next_dx_clean, next_dx_desc, next_ccsr, next_ccsr_desc
+        ,member_segment
+        ,COUNT(*)                                        AS transition_count
+        ,COUNT(DISTINCT member_id)                       AS unique_members
     FROM next_claims
-    GROUP BY trigger_specialty, next_dx, next_dx_clean, member_segment
+    GROUP BY
+        trigger_specialty, trigger_specialty_desc
+        ,next_dx, next_dx_clean, next_dx_desc, next_ccsr, next_ccsr_desc
+        ,member_segment
 ),
 specialty_totals AS (
     SELECT trigger_specialty, member_segment, SUM(transition_count) AS specialty_total
     FROM transition_counts GROUP BY trigger_specialty, member_segment
 )
 SELECT
-    t.trigger_specialty AS current_specialty, sp.long_dscrptn AS current_specialty_desc
-    ,t.next_dx, dx_desc.icd9_dx_dscrptn AS next_dx_desc
-    ,next_ccsr.ccsr_category AS next_ccsr
-    ,next_ccsr.ccsr_category_description AS next_ccsr_desc
+    t.trigger_specialty                                  AS current_specialty
+    ,t.trigger_specialty_desc                            AS current_specialty_desc
+    ,t.next_dx, t.next_dx_desc, t.next_ccsr, t.next_ccsr_desc
     ,t.member_segment, t.transition_count, t.unique_members, s.specialty_total
-    ,ROUND(t.transition_count / s.specialty_total, 4) AS conditional_probability
-    ,ROUND(-SUM(t.transition_count / s.specialty_total * LOG(t.transition_count / s.specialty_total))
-        OVER (PARTITION BY t.trigger_specialty, t.member_segment), 4) AS conditional_entropy
+    ,ROUND(t.transition_count / s.specialty_total, 4)    AS conditional_probability
+    ,ROUND(-SUM(t.transition_count / s.specialty_total *
+        LOG(t.transition_count / s.specialty_total)) OVER (
+            PARTITION BY t.trigger_specialty, t.member_segment
+        ), 4)                                            AS conditional_entropy
 FROM transition_counts t
 JOIN specialty_totals s ON t.trigger_specialty = s.trigger_specialty AND t.member_segment = s.member_segment
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp
-    ON t.trigger_specialty = sp.global_lookup_cd AND LOWER(sp.lookup_column_nm) = 'specialty_ctg_cd'
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` dx_desc ON t.next_dx = dx_desc.icd9_dx_cd
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_mwb_bh_analytics_cnsv.AHRQ_CCSR_DX_20260101` next_ccsr ON t.next_dx_clean = next_ccsr.icd_10_cm_code
 ORDER BY t.trigger_specialty, t.transition_count DESC;
 
 
@@ -373,55 +303,47 @@ DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_specialty_to_ccsr_order1`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
-WITH visit_spine AS (
-    SELECT DISTINCT member_id, visit_date
-        ,DENSE_RANK() OVER (PARTITION BY member_id ORDER BY visit_date) AS visit_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-),
-triggers AS (
-    SELECT DISTINCT f.member_id, f.visit_date AS trigger_date
-        ,f.specialty_ctg_cd AS trigger_specialty
-        ,CASE
-            WHEN f.age_nbr < 18 THEN 'Children'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'M' THEN 'Adult_Male'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'F' THEN 'Adult_Female'
-            WHEN f.age_nbr > 65 THEN 'Senior'
-         END AS member_segment
-        ,s.visit_rank AS trigger_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-    JOIN visit_spine s ON f.member_id = s.member_id AND f.visit_date = s.visit_date
-    WHERE f.is_first_dx_encounter = TRUE
-),
-next_claims AS (
-    SELECT DISTINCT t.member_id, t.trigger_date, t.trigger_specialty
-        ,t.member_segment, f.ccsr_category AS next_ccsr, f.ccsr_category_description AS next_ccsr_desc
-    FROM triggers t
-    JOIN visit_spine v2 ON t.member_id = v2.member_id AND v2.visit_rank = t.trigger_rank + 1
+WITH next_claims AS (
+    SELECT DISTINCT
+        t.member_id, t.trigger_date, t.trigger_specialty, t.trigger_specialty_desc
+        ,t.member_segment
+        ,f.ccsr_category                                 AS next_ccsr
+        ,f.ccsr_category_description                     AS next_ccsr_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers` t
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine` v2
+        ON t.member_id = v2.member_id
+        AND v2.visit_rank = t.trigger_rank + 1
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-        ON t.member_id = f.member_id AND v2.visit_date = f.visit_date
+        ON t.member_id = f.member_id
+        AND v2.visit_date = f.visit_date
     WHERE f.ccsr_category IS NOT NULL
+        AND t.trigger_specialty IS NOT NULL
 ),
 transition_counts AS (
-    SELECT trigger_specialty, next_ccsr, next_ccsr_desc, member_segment
-        ,COUNT(*) AS transition_count, COUNT(DISTINCT member_id) AS unique_members
+    SELECT
+        trigger_specialty, trigger_specialty_desc
+        ,next_ccsr, next_ccsr_desc, member_segment
+        ,COUNT(*)                                        AS transition_count
+        ,COUNT(DISTINCT member_id)                       AS unique_members
     FROM next_claims
-    GROUP BY trigger_specialty, next_ccsr, next_ccsr_desc, member_segment
+    GROUP BY trigger_specialty, trigger_specialty_desc, next_ccsr, next_ccsr_desc, member_segment
 ),
 specialty_totals AS (
     SELECT trigger_specialty, member_segment, SUM(transition_count) AS specialty_total
     FROM transition_counts GROUP BY trigger_specialty, member_segment
 )
 SELECT
-    t.trigger_specialty AS current_specialty, sp.long_dscrptn AS current_specialty_desc
+    t.trigger_specialty                                  AS current_specialty
+    ,t.trigger_specialty_desc                            AS current_specialty_desc
     ,t.next_ccsr, t.next_ccsr_desc
     ,t.member_segment, t.transition_count, t.unique_members, s.specialty_total
-    ,ROUND(t.transition_count / s.specialty_total, 4) AS conditional_probability
-    ,ROUND(-SUM(t.transition_count / s.specialty_total * LOG(t.transition_count / s.specialty_total))
-        OVER (PARTITION BY t.trigger_specialty, t.member_segment), 4) AS conditional_entropy
+    ,ROUND(t.transition_count / s.specialty_total, 4)    AS conditional_probability
+    ,ROUND(-SUM(t.transition_count / s.specialty_total *
+        LOG(t.transition_count / s.specialty_total)) OVER (
+            PARTITION BY t.trigger_specialty, t.member_segment
+        ), 4)                                            AS conditional_entropy
 FROM transition_counts t
 JOIN specialty_totals s ON t.trigger_specialty = s.trigger_specialty AND t.member_segment = s.member_segment
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp
-    ON t.trigger_specialty = sp.global_lookup_cd AND LOWER(sp.lookup_column_nm) = 'specialty_ctg_cd'
 ORDER BY t.trigger_specialty, t.transition_count DESC;
 
 
@@ -432,56 +354,50 @@ DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_ccsr_to_specialty_order1`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
-WITH visit_spine AS (
-    SELECT DISTINCT member_id, visit_date
-        ,DENSE_RANK() OVER (PARTITION BY member_id ORDER BY visit_date) AS visit_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-),
-triggers AS (
-    SELECT DISTINCT f.member_id, f.visit_date AS trigger_date
-        ,f.ccsr_category AS trigger_ccsr
-        ,f.ccsr_category_description AS trigger_ccsr_desc
-        ,CASE
-            WHEN f.age_nbr < 18 THEN 'Children'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'M' THEN 'Adult_Male'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'F' THEN 'Adult_Female'
-            WHEN f.age_nbr > 65 THEN 'Senior'
-         END AS member_segment
-        ,s.visit_rank AS trigger_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-    JOIN visit_spine s ON f.member_id = s.member_id AND f.visit_date = s.visit_date
-    WHERE f.is_first_dx_encounter = TRUE AND f.ccsr_category IS NOT NULL
-),
-next_claims AS (
-    SELECT DISTINCT t.member_id, t.trigger_date, t.trigger_ccsr, t.trigger_ccsr_desc
-        ,t.member_segment, f.specialty_ctg_cd AS next_specialty
-    FROM triggers t
-    JOIN visit_spine v2 ON t.member_id = v2.member_id AND v2.visit_rank = t.trigger_rank + 1
+WITH next_claims AS (
+    SELECT DISTINCT
+        t.member_id, t.trigger_date, t.trigger_ccsr, t.trigger_ccsr_desc
+        ,t.member_segment
+        ,f.specialty_ctg_cd                              AS next_specialty
+        ,sp.long_dscrptn                                 AS next_specialty_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers` t
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine` v2
+        ON t.member_id = v2.member_id
+        AND v2.visit_rank = t.trigger_rank + 1
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-        ON t.member_id = f.member_id AND v2.visit_date = f.visit_date
+        ON t.member_id = f.member_id
+        AND v2.visit_date = f.visit_date
+    LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp
+        ON f.specialty_ctg_cd = sp.global_lookup_cd
+        AND LOWER(sp.lookup_column_nm) = 'specialty_ctg_cd'
     WHERE f.specialty_ctg_cd IS NOT NULL
+        AND t.trigger_ccsr IS NOT NULL
 ),
 transition_counts AS (
-    SELECT trigger_ccsr, trigger_ccsr_desc, next_specialty, member_segment
-        ,COUNT(*) AS transition_count, COUNT(DISTINCT member_id) AS unique_members
+    SELECT
+        trigger_ccsr, trigger_ccsr_desc
+        ,next_specialty, next_specialty_desc, member_segment
+        ,COUNT(*)                                        AS transition_count
+        ,COUNT(DISTINCT member_id)                       AS unique_members
     FROM next_claims
-    GROUP BY trigger_ccsr, trigger_ccsr_desc, next_specialty, member_segment
+    GROUP BY trigger_ccsr, trigger_ccsr_desc, next_specialty, next_specialty_desc, member_segment
 ),
 ccsr_totals AS (
     SELECT trigger_ccsr, member_segment, SUM(transition_count) AS ccsr_total
     FROM transition_counts GROUP BY trigger_ccsr, member_segment
 )
 SELECT
-    t.trigger_ccsr AS current_ccsr, t.trigger_ccsr_desc AS current_ccsr_desc
-    ,t.next_specialty, sp.long_dscrptn AS next_specialty_desc
+    t.trigger_ccsr                                       AS current_ccsr
+    ,t.trigger_ccsr_desc                                 AS current_ccsr_desc
+    ,t.next_specialty, t.next_specialty_desc
     ,t.member_segment, t.transition_count, t.unique_members, c.ccsr_total
-    ,ROUND(t.transition_count / c.ccsr_total, 4) AS conditional_probability
-    ,ROUND(-SUM(t.transition_count / c.ccsr_total * LOG(t.transition_count / c.ccsr_total))
-        OVER (PARTITION BY t.trigger_ccsr, t.member_segment), 4) AS conditional_entropy
+    ,ROUND(t.transition_count / c.ccsr_total, 4)         AS conditional_probability
+    ,ROUND(-SUM(t.transition_count / c.ccsr_total *
+        LOG(t.transition_count / c.ccsr_total)) OVER (
+            PARTITION BY t.trigger_ccsr, t.member_segment
+        ), 4)                                            AS conditional_entropy
 FROM transition_counts t
 JOIN ccsr_totals c ON t.trigger_ccsr = c.trigger_ccsr AND t.member_segment = c.member_segment
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp
-    ON t.next_specialty = sp.global_lookup_cd AND LOWER(sp.lookup_column_nm) = 'specialty_ctg_cd'
 ORDER BY t.trigger_ccsr, t.transition_count DESC;
 
 
@@ -492,58 +408,56 @@ DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_ccsr_to_dx_order1`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
-WITH visit_spine AS (
-    SELECT DISTINCT member_id, visit_date
-        ,DENSE_RANK() OVER (PARTITION BY member_id ORDER BY visit_date) AS visit_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-),
-triggers AS (
-    SELECT DISTINCT f.member_id, f.visit_date AS trigger_date
-        ,f.ccsr_category AS trigger_ccsr
-        ,f.ccsr_category_description AS trigger_ccsr_desc
-        ,CASE
-            WHEN f.age_nbr < 18 THEN 'Children'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'M' THEN 'Adult_Male'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'F' THEN 'Adult_Female'
-            WHEN f.age_nbr > 65 THEN 'Senior'
-         END AS member_segment
-        ,s.visit_rank AS trigger_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-    JOIN visit_spine s ON f.member_id = s.member_id AND f.visit_date = s.visit_date
-    WHERE f.is_first_dx_encounter = TRUE AND f.ccsr_category IS NOT NULL
-),
-next_claims AS (
-    SELECT DISTINCT t.member_id, t.trigger_date, t.trigger_ccsr, t.trigger_ccsr_desc
-        ,t.member_segment, f.dx_raw AS next_dx, f.dx_clean AS next_dx_clean
-    FROM triggers t
-    JOIN visit_spine v2 ON t.member_id = v2.member_id AND v2.visit_rank = t.trigger_rank + 1
+WITH next_claims AS (
+    SELECT DISTINCT
+        t.member_id, t.trigger_date, t.trigger_ccsr, t.trigger_ccsr_desc
+        ,t.member_segment
+        ,f.dx_raw                                        AS next_dx
+        ,f.dx_clean                                      AS next_dx_clean
+        ,dx_desc.icd9_dx_dscrptn                         AS next_dx_desc
+        ,f.ccsr_category                                 AS next_ccsr
+        ,f.ccsr_category_description                     AS next_ccsr_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers` t
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine` v2
+        ON t.member_id = v2.member_id
+        AND v2.visit_rank = t.trigger_rank + 1
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-        ON t.member_id = f.member_id AND v2.visit_date = f.visit_date
+        ON t.member_id = f.member_id
+        AND v2.visit_date = f.visit_date
+    LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` dx_desc
+        ON f.dx_raw = dx_desc.icd9_dx_cd
     WHERE f.dx_raw IS NOT NULL
+        AND t.trigger_ccsr IS NOT NULL
 ),
 transition_counts AS (
-    SELECT trigger_ccsr, trigger_ccsr_desc, next_dx, next_dx_clean, member_segment
-        ,COUNT(*) AS transition_count, COUNT(DISTINCT member_id) AS unique_members
+    SELECT
+        trigger_ccsr, trigger_ccsr_desc
+        ,next_dx, next_dx_clean, next_dx_desc, next_ccsr, next_ccsr_desc
+        ,member_segment
+        ,COUNT(*)                                        AS transition_count
+        ,COUNT(DISTINCT member_id)                       AS unique_members
     FROM next_claims
-    GROUP BY trigger_ccsr, trigger_ccsr_desc, next_dx, next_dx_clean, member_segment
+    GROUP BY
+        trigger_ccsr, trigger_ccsr_desc
+        ,next_dx, next_dx_clean, next_dx_desc, next_ccsr, next_ccsr_desc
+        ,member_segment
 ),
 ccsr_totals AS (
     SELECT trigger_ccsr, member_segment, SUM(transition_count) AS ccsr_total
     FROM transition_counts GROUP BY trigger_ccsr, member_segment
 )
 SELECT
-    t.trigger_ccsr AS current_ccsr, t.trigger_ccsr_desc AS current_ccsr_desc
-    ,t.next_dx, dx_desc.icd9_dx_dscrptn AS next_dx_desc
-    ,next_ccsr.ccsr_category AS next_ccsr
-    ,next_ccsr.ccsr_category_description AS next_ccsr_desc
+    t.trigger_ccsr                                       AS current_ccsr
+    ,t.trigger_ccsr_desc                                 AS current_ccsr_desc
+    ,t.next_dx, t.next_dx_desc, t.next_ccsr, t.next_ccsr_desc
     ,t.member_segment, t.transition_count, t.unique_members, c.ccsr_total
-    ,ROUND(t.transition_count / c.ccsr_total, 4) AS conditional_probability
-    ,ROUND(-SUM(t.transition_count / c.ccsr_total * LOG(t.transition_count / c.ccsr_total))
-        OVER (PARTITION BY t.trigger_ccsr, t.member_segment), 4) AS conditional_entropy
+    ,ROUND(t.transition_count / c.ccsr_total, 4)         AS conditional_probability
+    ,ROUND(-SUM(t.transition_count / c.ccsr_total *
+        LOG(t.transition_count / c.ccsr_total)) OVER (
+            PARTITION BY t.trigger_ccsr, t.member_segment
+        ), 4)                                            AS conditional_entropy
 FROM transition_counts t
 JOIN ccsr_totals c ON t.trigger_ccsr = c.trigger_ccsr AND t.member_segment = c.member_segment
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` dx_desc ON t.next_dx = dx_desc.icd9_dx_cd
-LEFT JOIN `edp-prod-hcbstorage.edp_hcb_mwb_bh_analytics_cnsv.AHRQ_CCSR_DX_20260101` next_ccsr ON t.next_dx_clean = next_ccsr.icd_10_cm_code
 ORDER BY t.trigger_ccsr, t.transition_count DESC;
 
 
@@ -554,38 +468,28 @@ DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_ccsr_to_ccsr_order1`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
-WITH visit_spine AS (
-    SELECT DISTINCT member_id, visit_date
-        ,DENSE_RANK() OVER (PARTITION BY member_id ORDER BY visit_date) AS visit_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-),
-triggers AS (
-    SELECT DISTINCT f.member_id, f.visit_date AS trigger_date
-        ,f.ccsr_category AS trigger_ccsr
-        ,f.ccsr_category_description AS trigger_ccsr_desc
-        ,CASE
-            WHEN f.age_nbr < 18 THEN 'Children'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'M' THEN 'Adult_Male'
-            WHEN f.age_nbr BETWEEN 18 AND 65 AND f.gender_cd = 'F' THEN 'Adult_Female'
-            WHEN f.age_nbr > 65 THEN 'Senior'
-         END AS member_segment
-        ,s.visit_rank AS trigger_rank
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-    JOIN visit_spine s ON f.member_id = s.member_id AND f.visit_date = s.visit_date
-    WHERE f.is_first_dx_encounter = TRUE AND f.ccsr_category IS NOT NULL
-),
-next_claims AS (
-    SELECT DISTINCT t.member_id, t.trigger_date, t.trigger_ccsr, t.trigger_ccsr_desc
-        ,t.member_segment, f.ccsr_category AS next_ccsr, f.ccsr_category_description AS next_ccsr_desc
-    FROM triggers t
-    JOIN visit_spine v2 ON t.member_id = v2.member_id AND v2.visit_rank = t.trigger_rank + 1
+WITH next_claims AS (
+    SELECT DISTINCT
+        t.member_id, t.trigger_date, t.trigger_ccsr, t.trigger_ccsr_desc
+        ,t.member_segment
+        ,f.ccsr_category                                 AS next_ccsr
+        ,f.ccsr_category_description                     AS next_ccsr_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers` t
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine` v2
+        ON t.member_id = v2.member_id
+        AND v2.visit_rank = t.trigger_rank + 1
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
-        ON t.member_id = f.member_id AND v2.visit_date = f.visit_date
+        ON t.member_id = f.member_id
+        AND v2.visit_date = f.visit_date
     WHERE f.ccsr_category IS NOT NULL
+        AND t.trigger_ccsr IS NOT NULL
 ),
 transition_counts AS (
-    SELECT trigger_ccsr, trigger_ccsr_desc, next_ccsr, next_ccsr_desc, member_segment
-        ,COUNT(*) AS transition_count, COUNT(DISTINCT member_id) AS unique_members
+    SELECT
+        trigger_ccsr, trigger_ccsr_desc
+        ,next_ccsr, next_ccsr_desc, member_segment
+        ,COUNT(*)                                        AS transition_count
+        ,COUNT(DISTINCT member_id)                       AS unique_members
     FROM next_claims
     GROUP BY trigger_ccsr, trigger_ccsr_desc, next_ccsr, next_ccsr_desc, member_segment
 ),
@@ -594,12 +498,15 @@ ccsr_totals AS (
     FROM transition_counts GROUP BY trigger_ccsr, member_segment
 )
 SELECT
-    t.trigger_ccsr AS current_ccsr, t.trigger_ccsr_desc AS current_ccsr_desc
+    t.trigger_ccsr                                       AS current_ccsr
+    ,t.trigger_ccsr_desc                                 AS current_ccsr_desc
     ,t.next_ccsr, t.next_ccsr_desc
     ,t.member_segment, t.transition_count, t.unique_members, c.ccsr_total
-    ,ROUND(t.transition_count / c.ccsr_total, 4) AS conditional_probability
-    ,ROUND(-SUM(t.transition_count / c.ccsr_total * LOG(t.transition_count / c.ccsr_total))
-        OVER (PARTITION BY t.trigger_ccsr, t.member_segment), 4) AS conditional_entropy
+    ,ROUND(t.transition_count / c.ccsr_total, 4)         AS conditional_probability
+    ,ROUND(-SUM(t.transition_count / c.ccsr_total *
+        LOG(t.transition_count / c.ccsr_total)) OVER (
+            PARTITION BY t.trigger_ccsr, t.member_segment
+        ), 4)                                            AS conditional_entropy
 FROM transition_counts t
 JOIN ccsr_totals c ON t.trigger_ccsr = c.trigger_ccsr AND t.member_segment = c.member_segment
 ORDER BY t.trigger_ccsr, t.transition_count DESC;
