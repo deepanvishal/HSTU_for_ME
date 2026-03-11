@@ -100,3 +100,71 @@ ORDER BY
     t.member_id
     ,t.trigger_date
     ,t.trigger_dx_raw
+;
+
+
+
+-- ============================================================
+-- INTERIM 1: VISIT SPINE
+-- ============================================================
+DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine`;
+CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine`
+OPTIONS (
+    labels=[("owner", "deepan_thulasi_aetna_com")]
+)
+AS
+SELECT DISTINCT
+    member_id
+    ,visit_date
+    ,DENSE_RANK() OVER (
+        PARTITION BY member_id
+        ORDER BY visit_date
+    )                                                    AS visit_rank
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
+ORDER BY member_id, visit_date;
+
+
+-- ============================================================
+-- INTERIM 2: TRIGGERS
+-- ============================================================
+DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers`;
+CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers`
+OPTIONS (
+    labels=[("owner", "deepan_thulasi_aetna_com")]
+)
+AS
+SELECT DISTINCT
+    f.member_id
+    ,f.visit_date                                        AS trigger_date
+    ,f.dx_raw                                            AS trigger_dx
+    ,f.dx_clean                                          AS trigger_dx_clean
+    ,dx_desc.icd9_dx_dscrptn                             AS trigger_dx_desc
+    ,f.ccsr_category                                     AS trigger_ccsr
+    ,f.ccsr_category_description                         AS trigger_ccsr_desc
+    ,f.specialty_ctg_cd                                  AS trigger_specialty
+    ,sp.long_dscrptn                                     AS trigger_specialty_desc
+    ,CASE
+        WHEN f.age_nbr < 18                              THEN 'Children'
+        WHEN f.age_nbr BETWEEN 18 AND 65
+             AND f.gender_cd = 'M'                       THEN 'Adult_Male'
+        WHEN f.age_nbr BETWEEN 18 AND 65
+             AND f.gender_cd = 'F'                       THEN 'Adult_Female'
+        WHEN f.age_nbr > 65                              THEN 'Senior'
+     END                                                 AS member_segment
+    ,s.visit_rank                                        AS trigger_rank
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged` f
+JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visit_spine` s
+    ON f.member_id = s.member_id
+    AND f.visit_date = s.visit_date
+LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` dx_desc
+    ON f.dx_raw = dx_desc.icd9_dx_cd
+LEFT JOIN `edp-prod-hcbstorage.edp_hcb_mwb_bh_analytics_cnsv.AHRQ_CCSR_DX_20260101` ccsr
+    ON f.dx_clean = ccsr.icd_10_cm_code
+LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp
+    ON f.specialty_ctg_cd = sp.global_lookup_cd
+    AND LOWER(sp.lookup_column_nm) = 'specialty_ctg_cd'
+WHERE f.is_first_dx_encounter = TRUE
+ORDER BY
+    f.member_id
+    ,f.visit_date
+    ,f.dx_raw;
