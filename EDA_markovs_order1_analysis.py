@@ -137,3 +137,56 @@ print("\nTop 10 most predictable domains:")
 print(domain_entropy.sort_values("weighted_avg_entropy").head(10)[
     ["ccsr_category", "ccsr_category_description", "weighted_avg_entropy", "total_transitions"]
 ].to_string(index=False))
+
+
+
+# ── 5. PROBABILITY VS VOLUME SCATTER ─────────────────────────────────────────
+scatter_df = df[df["current_dx"].isin(top_dx)].copy()
+
+plt.figure(figsize=(12, 8))
+sns.scatterplot(
+    data=scatter_df,
+    x="transition_count",
+    y="conditional_probability",
+    hue="dx_description",
+    size="unique_members",
+    sizes=(20, 400),
+    alpha=0.6,
+    palette="viridis"
+)
+plt.axhline(0.5, color='red', linestyle='--', alpha=0.5)
+plt.title("Transition Confidence: Volume vs Probability", fontsize=14)
+plt.xlabel("Total Transition Count", fontsize=12)
+plt.ylabel("Conditional Probability", fontsize=12)
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title="Diagnosis", fontsize=7)
+plt.grid(True, linestyle='--', alpha=0.4)
+plt.tight_layout()
+plt.savefig("scatter_volume_vs_probability.png", dpi=150)
+plt.show()
+
+# ── 6. NETWORKX DIRECTED GRAPH ────────────────────────────────────────────────
+import networkx as nx
+
+G = nx.DiGraph()
+for _, row in top20.iterrows():
+    G.add_edge(
+        row["dx_description"],
+        row["specialty_description"],
+        weight=row["transition_count"]
+    )
+
+dx_nodes      = top20["dx_description"].unique().tolist()
+spec_nodes    = top20["specialty_description"].unique().tolist()
+node_colors   = ["#4C9BE8" if n in dx_nodes else "#F4845F" for n in G.nodes()]
+weights       = [G[u][v]["weight"] / top20["transition_count"].max() * 8 for u, v in G.edges()]
+
+plt.figure(figsize=(16, 11))
+pos = nx.spring_layout(G, k=3.0, seed=42)
+nx.draw_networkx_nodes(G, pos, node_size=2500, node_color=node_colors, alpha=0.85)
+nx.draw_networkx_edges(G, pos, width=weights, edge_color="grey", arrowsize=18, alpha=0.5)
+nx.draw_networkx_labels(G, pos, font_size=7, font_weight="bold")
+plt.title("Diagnosis → Specialty Flow Network (Top 20 Transitions)", fontsize=14)
+plt.axis("off")
+plt.tight_layout()
+plt.savefig("network_dx_to_specialty.png", dpi=150)
+plt.show()
