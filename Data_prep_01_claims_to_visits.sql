@@ -7,6 +7,7 @@ AS
 WITH base AS (
     SELECT
         member_id
+        ,srv_prvdr_id
         ,srv_start_dt                                    AS visit_date
         ,specialty_ctg_cd
         ,age_nbr
@@ -31,10 +32,16 @@ with_flags AS (
                 PARTITION BY member_id, dx_raw
             ) THEN TRUE ELSE FALSE
          END                                             AS is_first_dx_encounter
+        ,CASE
+            WHEN visit_date = MIN(visit_date) OVER (
+                PARTITION BY member_id, srv_prvdr_id
+            ) THEN TRUE ELSE FALSE
+         END                                             AS is_first_provider_visit
     FROM base b
 )
 SELECT
     f.member_id
+    ,f.srv_prvdr_id
     ,f.visit_date
     ,f.visit_number
     ,f.specialty_ctg_cd
@@ -43,6 +50,20 @@ SELECT
     ,f.dx_raw
     ,f.dx_clean
     ,f.is_first_dx_encounter
+    ,f.is_first_provider_visit
+    ,visit_number = 1                                    AS is_first_member_visit
+    ,CASE
+        WHEN visit_number = 1
+            THEN 'first_member_visit'
+        WHEN f.is_first_provider_visit AND f.is_first_dx_encounter
+            THEN 'new_provider_new_dx'
+        WHEN f.is_first_provider_visit AND NOT f.is_first_dx_encounter
+            THEN 'new_provider_known_dx'
+        WHEN NOT f.is_first_provider_visit AND f.is_first_dx_encounter
+            THEN 'known_provider_new_dx'
+        WHEN NOT f.is_first_provider_visit AND NOT f.is_first_dx_encounter
+            THEN 'known_provider_known_dx'
+     END                                                 AS visit_flag
     ,c.ccsr_category
     ,c.ccsr_category_description
 FROM with_flags f
