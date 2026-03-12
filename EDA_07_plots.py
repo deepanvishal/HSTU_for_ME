@@ -200,46 +200,89 @@ def plot_scatter(df, current_col, current_desc, next_col, title, filename):
     plt.savefig(filename, dpi=150, bbox_inches="tight")
     plt.show()
 
-def plot_network(df, current_col, current_desc, next_col, next_desc, cohort, title, filename):
+# ── NETWORK LAYOUT SWITCH — change this to try different layouts ──────────────
+# Options: plot_network_spring | plot_network_kamada | plot_network_shell | plot_network_bipartite
+NETWORK_FN = plot_network_bipartite
+
+
+def _build_graph(df, current_col, current_desc, next_col, next_desc, cohort, top_n=15):
     sub = (
         df[df["member_segment"] == cohort]
         .groupby([current_col, current_desc, next_col, next_desc], as_index=False)
         ["transition_count"].sum()
         .sort_values("transition_count", ascending=False)
-        .head(20)
+        .head(top_n)
     )
     if sub.empty:
-        print(f"No data for {cohort}")
-        return
-
+        return None, None, None
     G = nx.DiGraph()
     for _, row in sub.iterrows():
         G.add_edge(row[current_desc], row[next_desc], weight=row["transition_count"])
-
     current_nodes = sub[current_desc].unique().tolist()
-    next_nodes    = sub[next_desc].unique().tolist()
-    node_colors   = ["#4C9BE8" if n in current_nodes else "#F4845F" for n in G.nodes()]
-    max_weight    = sub["transition_count"].max()
-    edge_widths   = [G[u][v]["weight"] / max_weight * 12 + 2 for u, v in G.edges()]
+    return G, current_nodes, sub
+
+
+def _draw_network(G, pos, current_nodes, title, filename):
+    max_weight  = max([G[u][v]["weight"] for u, v in G.edges()], default=1)
+    edge_widths = [G[u][v]["weight"] / max_weight * 12 + 2 for u, v in G.edges()]
+    node_colors = ["#4C9BE8" if n in current_nodes else "#F4845F" for n in G.nodes()]
 
     fig, ax = plt.subplots(figsize=(22, 16))
-    pos = nx.spring_layout(G, k=4.0, seed=42, iterations=100)
     nx.draw_networkx_nodes(G, pos, node_size=4000, node_color=node_colors, alpha=0.9, ax=ax)
     nx.draw_networkx_edges(G, pos, width=edge_widths, edge_color="#555555",
                            arrowsize=30, arrowstyle="-|>",
                            connectionstyle="arc3,rad=0.1",
                            min_source_margin=30, min_target_margin=30, ax=ax)
     nx.draw_networkx_labels(G, pos, font_size=8, font_weight="bold", ax=ax)
-    ax.set_title(f"{title} — {cohort}", fontsize=14, fontweight="bold")
+    ax.set_title(title, fontsize=14, fontweight="bold")
     ax.axis("off")
-    blue_patch  = plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#4C9BE8",
-                              markersize=12, label="First Visit State")
+    blue_patch   = plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#4C9BE8",
+                               markersize=12, label="First Visit State")
     orange_patch = plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#F4845F",
                                markersize=12, label="Next Visit State")
     ax.legend(handles=[blue_patch, orange_patch], loc="upper left", fontsize=10)
     plt.tight_layout()
     plt.savefig(filename, dpi=150, bbox_inches="tight")
     plt.show()
+
+
+def plot_network_spring(df, current_col, current_desc, next_col, next_desc, cohort, title, filename):
+    G, current_nodes, sub = _build_graph(df, current_col, current_desc, next_col, next_desc, cohort)
+    if G is None:
+        print(f"No data for {cohort}")
+        return
+    pos = nx.spring_layout(G, k=4.0, seed=42, iterations=100)
+    _draw_network(G, pos, current_nodes, f"{title} — {cohort}", filename)
+
+
+def plot_network_kamada(df, current_col, current_desc, next_col, next_desc, cohort, title, filename):
+    G, current_nodes, sub = _build_graph(df, current_col, current_desc, next_col, next_desc, cohort)
+    if G is None:
+        print(f"No data for {cohort}")
+        return
+    pos = nx.kamada_kawai_layout(G)
+    _draw_network(G, pos, current_nodes, f"{title} — {cohort}", filename)
+
+
+def plot_network_shell(df, current_col, current_desc, next_col, next_desc, cohort, title, filename):
+    G, current_nodes, sub = _build_graph(df, current_col, current_desc, next_col, next_desc, cohort)
+    if G is None:
+        print(f"No data for {cohort}")
+        return
+    next_nodes = [n for n in G.nodes() if n not in current_nodes]
+    pos        = nx.shell_layout(G, nlist=[current_nodes, next_nodes])
+    _draw_network(G, pos, current_nodes, f"{title} — {cohort}", filename)
+
+
+def plot_network_bipartite(df, current_col, current_desc, next_col, next_desc, cohort, title, filename):
+    G, current_nodes, sub = _build_graph(df, current_col, current_desc, next_col, next_desc, cohort)
+    if G is None:
+        print(f"No data for {cohort}")
+        return
+    for node in G.nodes():
+        G.nodes[node]["bipartite"] = 0 if node in current_nodes else 1
+    pos = nx.bipartite_layout(G, current_nodes, align="vertical", scale=2.0)
+    _draw_network(G, pos, current_nodes, f"{title} — {cohort}", filename)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -317,7 +360,7 @@ Orange nodes are provider specialties at the next visit.
 Arrow thickness reflects transition volume — thicker means more members followed that path.
 """))
 for cohort in COHORTS:
-    plot_network(df_dx_spec, "current_dx", "current_dx_desc", "next_specialty", "next_specialty_desc",
+    NETWORK_FN(df_dx_spec, "current_dx", "current_dx_desc", "next_specialty", "next_specialty_desc",
                  cohort, "Diagnosis to Specialty Network",
                  f"network_dx_to_specialty_{cohort}.png")
 
@@ -382,7 +425,7 @@ display(Markdown("""
 #### Transition Network — Top 20 Paths
 """))
 for cohort in COHORTS:
-    plot_network(df_dx_ccsr, "current_dx", "current_dx_desc", "next_ccsr", "next_ccsr_desc",
+    NETWORK_FN(df_dx_ccsr, "current_dx", "current_dx_desc", "next_ccsr", "next_ccsr_desc",
                  cohort, "Diagnosis to CCSR Network",
                  f"network_dx_to_ccsr_{cohort}.png")
 
@@ -449,6 +492,6 @@ display(Markdown("""
 #### Transition Network — Top 20 Paths
 """))
 for cohort in COHORTS:
-    plot_network(df_dx_dx, "current_dx", "current_dx_desc", "next_dx", "next_dx_desc",
+    NETWORK_FN(df_dx_dx, "current_dx", "current_dx_desc", "next_dx", "next_dx_desc",
                  cohort, "Diagnosis to Diagnosis Network",
                  f"network_dx_to_dx_{cohort}.png")
