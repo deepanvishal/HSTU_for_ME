@@ -71,16 +71,15 @@ WITH claims_raw AS (
         ,srv_start_dt
         ,pri_icd9_dx_cd
         ,specialty_ctg_cd
+        ,REPLACE(pri_icd9_dx_cd, '.', '')               AS dx_clean
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_2022_2025_sfl`
+),
+ccsr_mapped AS (
+    SELECT DISTINCT icd_10_cm_code
+    FROM `edp-prod-hcbstorage.edp_hcb_mwb_bh_analytics_cnsv.AHRQ_CCSR_DX_20260101`
 ),
 total AS (
     SELECT COUNT(*) AS n FROM claims_raw
-),
-members_2plus AS (
-    SELECT COUNT(DISTINCT member_id) AS n
-    FROM claims_raw
-    GROUP BY member_id
-    HAVING COUNT(DISTINCT srv_start_dt) >= 2
 )
 SELECT
     t.n                                                                          AS total_claims
@@ -92,15 +91,22 @@ SELECT
         AND c.specialty_ctg_cd != '')                                            AS claims_with_specialty
     ,ROUND(COUNTIF(c.specialty_ctg_cd IS NOT NULL
         AND c.specialty_ctg_cd != '') / t.n * 100, 2)                           AS pct_with_specialty
-    ,(SELECT COUNT(*) FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-      WHERE ccsr_category IS NOT NULL
-        AND ccsr_category != '')                                                  AS claims_with_ccsr
-    ,ROUND((SELECT COUNT(*) FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_claims_flagged`
-      WHERE ccsr_category IS NOT NULL
-        AND ccsr_category != '') / t.n * 100, 2)                                AS pct_with_ccsr
-    ,(SELECT COUNT(*) FROM members_2plus)                                        AS members_with_2plus_visits
-    ,ROUND((SELECT COUNT(*) FROM members_2plus) /
-      (SELECT COUNT(DISTINCT member_id) FROM claims_raw) * 100, 2)              AS pct_members_with_2plus_visits
+    ,COUNTIF(m.icd_10_cm_code IS NOT NULL)                                      AS claims_with_ccsr
+    ,ROUND(COUNTIF(m.icd_10_cm_code IS NOT NULL) / t.n * 100, 2)               AS pct_with_ccsr
+    ,(SELECT COUNT(DISTINCT member_id) FROM claims_raw
+      WHERE member_id IN (
+          SELECT member_id FROM claims_raw
+          GROUP BY member_id
+          HAVING COUNT(DISTINCT srv_start_dt) >= 2
+      ))                                                                          AS members_with_2plus_visits
+    ,ROUND((SELECT COUNT(DISTINCT member_id) FROM claims_raw
+      WHERE member_id IN (
+          SELECT member_id FROM claims_raw
+          GROUP BY member_id
+          HAVING COUNT(DISTINCT srv_start_dt) >= 2
+      )) / (SELECT COUNT(DISTINCT member_id) FROM claims_raw) * 100, 2)         AS pct_members_with_2plus_visits
 FROM claims_raw c
+LEFT JOIN ccsr_mapped m
+    ON c.dx_clean = m.icd_10_cm_code
 CROSS JOIN total t
 GROUP BY t.n
