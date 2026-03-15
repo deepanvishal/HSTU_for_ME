@@ -19,6 +19,20 @@ the scope, input features, target variable, and time window of the prediction mo
 
 ---
 
+## Assumptions
+
+### Visit
+- Unit: `member + service date + specialty + diagnosis code`
+- Multiple claim lines for the same unit are collapsed into one visit
+- One date can produce multiple visits if diagnosis or specialty differs
+
+### First Encounter of a Diagnosis
+- Defined as the first date a member presents with a specific ICD-10 code
+- Used as the **starting point** to identify next visit characteristics
+- Does not imply first onset of the underlying condition
+
+---
+
 ## Data Decisions This EDA Must Answer
 
 1. **What is the right prediction target?**
