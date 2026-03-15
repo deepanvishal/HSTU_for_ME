@@ -119,6 +119,41 @@ TBD
 
 > Full results: `EDA_01_entropy_summary.ipynb`
 
+### How Entropy Is Calculated — Example
+
+Consider a diagnosis code that transitions to three specialties:
+
+**Example 1 — Concentrated distribution:**
+
+| Next Specialty | Transition Count | Probability |
+|---|---|---|
+| Endocrinology | 800 | 0.80 |
+| Family Practice | 100 | 0.10 |
+| Laboratory | 100 | 0.10 |
+| **Total** | **1000** | **1.00** |
+```
+H = -(0.80 * log(0.80)) - (0.10 * log(0.10)) - (0.10 * log(0.10))
+H = 0.178 + 0.230 + 0.230
+H = 0.638
+```
+
+**Example 2 — Same specialties, more even distribution:**
+
+| Next Specialty | Transition Count | Probability |
+|---|---|---|
+| Endocrinology | 400 | 0.40 |
+| Family Practice | 300 | 0.30 |
+| Laboratory | 300 | 0.30 |
+| **Total** | **1000** | **1.00** |
+```
+H = -(0.40 * log(0.40)) - (0.30 * log(0.30)) - (0.30 * log(0.30))
+H = 0.367 + 0.361 + 0.361
+H = 1.089
+```
+
+**0.638 vs 1.089** — same three specialties, but the more evenly spread distribution
+is harder to predict. Higher entropy = weaker signal.
+
 ### Decision
 
 **Starting unit:** Diagnosis Code (ICD-10)
