@@ -135,3 +135,33 @@ Higher values indicate better predictive performance.
 Compare across time windows to see if signal strengthens over longer windows.
 """))
 plot_metrics(summary, "markov_baseline_metrics.png")
+
+summary_all = (
+    all_metrics
+    .groupby(["time_window", "k"], as_index=False)
+    .agg(
+        hit_rate=("hit", "mean"),
+        precision=("precision", "mean"),
+        recall=("recall", "mean"),
+        ndcg=("ndcg", "mean"),
+        total_members=("member_id", "nunique")
+    )
+    .round(4)
+    .sort_values(["time_window", "k"])
+)
+
+display(Markdown("## Overall Metrics — All Cohorts Combined"))
+for window in ["T30", "T60", "T180"]:
+    display(Markdown(f"### {window}"))
+    display(
+        summary_all[summary_all["time_window"] == window][[
+            "k", "hit_rate", "precision", "recall", "ndcg", "total_members"
+        ]].rename(columns={
+            "k": "K",
+            "hit_rate": "Hit@K",
+            "precision": "Precision@K",
+            "recall": "Recall@K",
+            "ndcg": "NDCG@K",
+            "total_members": "Test Members"
+        }).reset_index(drop=True)
+    )
