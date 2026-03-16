@@ -70,41 +70,37 @@ def plot_heatmap(df, title, filename):
     plt.show()
 
 
-# ── ENTROPY BAR CHART — TOP 5 DIAGNOSES ──────────────────────────────────────
+# ── ENTROPY BAR CHART — TOP 10 BY VOLUME ─────────────────────────────────────
 def plot_entropy_bar(df, title, filename):
-    fig, axes = plt.subplots(2, 2, figsize=(24, 20))
+    fig, axes = plt.subplots(2, 2, figsize=(22, 18))
     axes = axes.flatten()
     for i, cohort in enumerate(COHORTS):
         ax = axes[i]
         sub = df[df["member_segment"] == cohort]
-        top5_dx = sub.groupby("trigger_dx")["members_visited"].sum().nlargest(5).index
-        sub = sub[sub["trigger_dx"].isin(top5_dx)].copy()
-        if sub.empty:
+        domain = (
+            sub.groupby(["trigger_dx", "trigger_dx_desc"], as_index=False)
+            .apply(lambda g: pd.Series({
+                "weighted_avg_entropy": np.average(
+                    g["binary_entropy"], weights=g["members_visited"]),
+                "total_members": g["members_visited"].sum()
+            }))
+            .reset_index(drop=True)
+            .nlargest(10, "total_members")
+            .sort_values("weighted_avg_entropy")
+        )
+        if domain.empty:
             ax.set_title(f"{cohort} — No Data")
             continue
-        plot_data = (
-            sub.groupby(["trigger_dx_desc", "visit_specialty_desc"], as_index=False)
-            .agg(binary_entropy=("binary_entropy", "mean"),
-                 penetration_rate=("penetration_rate", "mean"))
-            .query("penetration_rate >= 0.10")
-            .sort_values(["trigger_dx_desc", "binary_entropy"])
-        )
         colors = plt.cm.RdYlGn_r(
-            plot_data["binary_entropy"] / 0.693
+            (domain["weighted_avg_entropy"] - domain["weighted_avg_entropy"].min())
+            / (domain["weighted_avg_entropy"].max() - domain["weighted_avg_entropy"].min() + 1e-9)
         )
-        bars = ax.barh(
-            plot_data["visit_specialty_desc"] + " | " + plot_data["trigger_dx_desc"].str[:25],
-            plot_data["binary_entropy"],
-            color=colors,
-            alpha=0.85
-        )
-        ax.axvline(0.693, color="red", linestyle="--", alpha=0.5, label="Max Uncertainty")
-        ax.set_xlabel("Binary Entropy", fontsize=9)
+        ax.barh(domain["trigger_dx_desc"], domain["weighted_avg_entropy"], color=colors)
+        ax.set_xlabel("Weighted Average Binary Entropy", fontsize=9)
         ax.set_title(f"{cohort}", fontsize=12, fontweight="bold")
         ax.xaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
-        ax.legend(fontsize=8)
         ax.invert_yaxis()
-        plt.setp(ax.get_yticklabels(), fontsize=7)
+        plt.setp(ax.get_yticklabels(), fontsize=8)
     fig.suptitle(title, fontsize=15, fontweight="bold")
     plt.tight_layout()
     plt.savefig(filename, dpi=150, bbox_inches="tight")
