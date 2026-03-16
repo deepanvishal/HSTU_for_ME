@@ -223,4 +223,11 @@ display(Markdown("""
 #### Transition Network — Three Layer Chain
 
 Blue nodes are trigger diagnoses at the first encounter.
-Orange nodes are diagnoses observed at the second visit
+Orange nodes are diagnoses observed at the second visit.
+Green nodes are the predicted provider specialties.
+Arrow thickness reflects transition volume.
+"""))
+for cohort in COHORTS:
+    plot_network_3layer(df, cohort,
+                        "Order 2 Diagnosis Chain to Specialty",
+                        f"network_order2_dx_to_specialty_{cohort}.png")
