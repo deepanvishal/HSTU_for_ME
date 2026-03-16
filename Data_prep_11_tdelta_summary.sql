@@ -1,5 +1,5 @@
 -- ============================================================
--- TRACK 1 PENETRATION SUMMARY — T30, T60, T180
+-- TRACK 1 PENETRATION SUMMARY — T30, T60, T180 WITH BINARY ENTROPY
 -- ============================================================
 DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_track1_penetration`;
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_f_track1_penetration`
@@ -71,25 +71,35 @@ specialty_visits AS (
         ,member_segment
         ,visit_specialty, visit_specialty_desc
         ,time_window
+),
+with_penetration AS (
+    SELECT
+        s.trigger_dx
+        ,s.trigger_dx_desc
+        ,s.trigger_ccsr
+        ,s.trigger_ccsr_desc
+        ,s.trigger_specialty
+        ,s.member_segment
+        ,s.visit_specialty
+        ,s.visit_specialty_desc
+        ,s.time_window
+        ,s.members_visited
+        ,s.visit_count
+        ,t.total_members
+        ,ROUND(s.members_visited / t.total_members, 4)   AS penetration_rate
+    FROM specialty_visits s
+    JOIN member_trigger_totals t
+        ON s.trigger_dx = t.trigger_dx
+        AND s.member_segment = t.member_segment
+        AND s.time_window = t.time_window
+    WHERE t.total_members >= 100
 )
 SELECT
-    s.trigger_dx
-    ,s.trigger_dx_desc
-    ,s.trigger_ccsr
-    ,s.trigger_ccsr_desc
-    ,s.trigger_specialty
-    ,s.member_segment
-    ,s.visit_specialty
-    ,s.visit_specialty_desc
-    ,s.time_window
-    ,s.members_visited
-    ,s.visit_count
-    ,t.total_members
-    ,ROUND(s.members_visited / t.total_members, 4)       AS penetration_rate
-FROM specialty_visits s
-JOIN member_trigger_totals t
-    ON s.trigger_dx = t.trigger_dx
-    AND s.member_segment = t.member_segment
-    AND s.time_window = t.time_window
-WHERE t.total_members >= 100
-ORDER BY s.time_window, s.trigger_dx, s.penetration_rate DESC
+    *
+    ,ROUND(
+        -penetration_rate * LOG(penetration_rate)
+        - (1 - penetration_rate) * LOG(1 - penetration_rate)
+    , 4)                                                 AS binary_entropy
+FROM with_penetration
+WHERE penetration_rate > 0 AND penetration_rate < 1
+ORDER BY time_window, trigger_dx, penetration_rate DESC
