@@ -38,7 +38,7 @@ def plot_heatmap(df, title, filename):
     for i, cohort in enumerate(COHORTS):
         ax = axes[i]
         sub = df[df["member_segment"] == cohort]
-        top_v1 = sub.groupby("current_dx_v1")["transition_count"].sum().nlargest(12).index
+        top_v1   = sub.groupby("current_dx_v1")["transition_count"].sum().nlargest(12).index
         top_spec = sub.groupby("next_specialty")["transition_count"].sum().nlargest(12).index
         sub = sub[sub["current_dx_v1"].isin(top_v1) & sub["next_specialty"].isin(top_spec)]
         pivot = (
@@ -96,6 +96,70 @@ def plot_ccsr_entropy(df, title, filename):
         ax.invert_yaxis()
         plt.setp(ax.get_yticklabels(), fontsize=8)
     fig.suptitle(title, fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150, bbox_inches="tight")
+    plt.show()
+
+
+def plot_network_3layer(df, cohort, title, filename, top_n=15):
+    sub = (
+        df[df["member_segment"] == cohort]
+        .groupby(["current_dx_v1_desc", "current_dx_v2_desc", "next_specialty_desc"],
+                 as_index=False)["transition_count"].sum()
+        .sort_values("transition_count", ascending=False)
+        .head(top_n)
+    )
+    if sub.empty:
+        print(f"No data for {cohort}")
+        return
+
+    G = nx.DiGraph()
+    for _, row in sub.iterrows():
+        v1_label   = row["current_dx_v1_desc"] + " (V1)"
+        v2_label   = row["current_dx_v2_desc"] + " (V2)"
+        spec_label = row["next_specialty_desc"]
+
+        G.add_node(v1_label,   layer=0)
+        G.add_node(v2_label,   layer=1)
+        G.add_node(spec_label, layer=2)
+        G.add_edge(v1_label,   v2_label,   weight=row["transition_count"])
+        G.add_edge(v2_label,   spec_label, weight=row["transition_count"])
+
+    layer0 = [n for n, d in G.nodes(data=True) if d.get("layer") == 0]
+    layer1 = [n for n, d in G.nodes(data=True) if d.get("layer") == 1]
+    layer2 = [n for n, d in G.nodes(data=True) if d.get("layer") == 2]
+
+    pos = {}
+    for j, n in enumerate(layer0):
+        pos[n] = (0, j * 2.5)
+    for j, n in enumerate(layer1):
+        pos[n] = (4, j * 2.5)
+    for j, n in enumerate(layer2):
+        pos[n] = (8, j * 2.5)
+
+    max_weight  = max([G[u][v]["weight"] for u, v in G.edges()], default=1)
+    edge_widths = [G[u][v]["weight"] / max_weight * 12 + 2 for u, v in G.edges()]
+    node_colors = ["#4C9BE8" if G.nodes[n].get("layer") == 0
+                   else "#F4845F" if G.nodes[n].get("layer") == 1
+                   else "#5DBE7E" for n in G.nodes()]
+
+    fig, ax = plt.subplots(figsize=(28, 18))
+    nx.draw_networkx_nodes(G, pos, node_size=4000, node_color=node_colors, alpha=0.9, ax=ax)
+    nx.draw_networkx_edges(G, pos, width=edge_widths, edge_color="#555555",
+                           arrowsize=30, arrowstyle="-|>",
+                           connectionstyle="arc3,rad=0.1",
+                           min_source_margin=30, min_target_margin=30, ax=ax)
+    nx.draw_networkx_labels(G, pos, font_size=8, font_weight="bold", ax=ax)
+
+    blue_patch   = plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#4C9BE8",
+                               markersize=12, label="Trigger Diagnosis (V1)")
+    orange_patch = plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#F4845F",
+                               markersize=12, label="Second Visit Diagnosis (V2)")
+    green_patch  = plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#5DBE7E",
+                               markersize=12, label="Next Specialty")
+    ax.legend(handles=[blue_patch, orange_patch, green_patch], loc="upper left", fontsize=10)
+    ax.set_title(f"{title} — {cohort}", fontsize=14, fontweight="bold")
+    ax.axis("off")
     plt.tight_layout()
     plt.savefig(filename, dpi=150, bbox_inches="tight")
     plt.show()
