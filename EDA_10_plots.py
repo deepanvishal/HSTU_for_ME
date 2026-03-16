@@ -101,69 +101,6 @@ def plot_ccsr_entropy(df, title, filename):
     plt.show()
 
 
-def plot_network_3layer(df, cohort, title, filename, top_n=15):
-    sub = (
-        df[df["member_segment"] == cohort]
-        .groupby(["current_dx_v1_desc", "current_dx_v2_desc", "next_specialty_desc"],
-                 as_index=False)["transition_count"].sum()
-        .sort_values("transition_count", ascending=False)
-        .head(top_n)
-    )
-    if sub.empty:
-        print(f"No data for {cohort}")
-        return
-
-    G = nx.DiGraph()
-    for _, row in sub.iterrows():
-        G.add_node(row["current_dx_v1_desc"], layer=0)
-        G.add_node(row["current_dx_v2_desc"], layer=1)
-        G.add_node(row["next_specialty_desc"], layer=2)
-        G.add_edge(row["current_dx_v1_desc"], row["current_dx_v2_desc"],
-                   weight=row["transition_count"])
-        G.add_edge(row["current_dx_v2_desc"], row["next_specialty_desc"],
-                   weight=row["transition_count"])
-
-    layer0 = [n for n, d in G.nodes(data=True) if d.get("layer") == 0]
-    layer1 = [n for n, d in G.nodes(data=True) if d.get("layer") == 1]
-    layer2 = [n for n, d in G.nodes(data=True) if d.get("layer") == 2]
-
-    pos = {}
-    for j, n in enumerate(layer0):
-        pos[n] = (0, j * 2)
-    for j, n in enumerate(layer1):
-        pos[n] = (3, j * 2)
-    for j, n in enumerate(layer2):
-        pos[n] = (6, j * 2)
-
-    max_weight  = max([G[u][v]["weight"] for u, v in G.edges()], default=1)
-    edge_widths = [G[u][v]["weight"] / max_weight * 12 + 2 for u, v in G.edges()]
-    node_colors = []
-    for n in G.nodes():
-        layer = G.nodes[n].get("layer", 0)
-        node_colors.append(["#4C9BE8", "#F4845F", "#5DBE7E"][layer])
-
-    fig, ax = plt.subplots(figsize=(26, 18))
-    nx.draw_networkx_nodes(G, pos, node_size=4000, node_color=node_colors, alpha=0.9, ax=ax)
-    nx.draw_networkx_edges(G, pos, width=edge_widths, edge_color="#555555",
-                           arrowsize=30, arrowstyle="-|>",
-                           connectionstyle="arc3,rad=0.1",
-                           min_source_margin=30, min_target_margin=30, ax=ax)
-    nx.draw_networkx_labels(G, pos, font_size=8, font_weight="bold", ax=ax)
-
-    blue_patch   = plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#4C9BE8",
-                               markersize=12, label="Trigger Diagnosis (V1)")
-    orange_patch = plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#F4845F",
-                               markersize=12, label="Second Visit Diagnosis (V2)")
-    green_patch  = plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#5DBE7E",
-                               markersize=12, label="Next Specialty")
-    ax.legend(handles=[blue_patch, orange_patch, green_patch], loc="upper left", fontsize=10)
-    ax.set_title(f"{title} — {cohort}", fontsize=14, fontweight="bold")
-    ax.axis("off")
-    plt.tight_layout()
-    plt.savefig(filename, dpi=150, bbox_inches="tight")
-    plt.show()
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # ORDER 2 — DIAGNOSIS CODE TO PROVIDER SPECIALTY
 # ══════════════════════════════════════════════════════════════════════════════
