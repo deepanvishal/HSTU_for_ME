@@ -74,3 +74,143 @@ LEFT JOIN `edp-prod-hcbstorage.edp_hcb_mwb_bh_analytics_cnsv.AHRQ_CCSR_DX_202601
 LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp
     ON r.specialty_ctg_cd = sp.global_lookup_cd
     AND LOWER(sp.lookup_column_nm) = 'specialty_ctg_cd'
+;
+
+
+DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers_qualified`;
+CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers_qualified`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+WITH first_encounters AS (
+    SELECT
+        member_id
+        ,visit_date                                      AS trigger_date
+        ,visit_rank                                      AS trigger_rank
+        ,dx_raw                                          AS trigger_dx
+        ,dx_clean                                        AS trigger_dx_clean
+        ,ccsr_category                                   AS trigger_ccsr
+        ,ccsr_category_description                       AS trigger_ccsr_desc
+        ,specialty_ctg_cd                                AS trigger_specialty
+        ,specialty_desc                                  AS trigger_specialty_desc
+        ,age_nbr
+        ,gender_cd
+        ,member_segment
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits`
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY member_id, dx_clean
+        ORDER BY visit_date
+    ) = 1
+),
+dx_history AS (
+    SELECT DISTINCT
+        member_id
+        ,dx_clean
+        ,visit_date
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits`
+),
+boundary_checks AS (
+    SELECT
+        f.*
+        ,m.enrollment_start
+        ,m.enrollment_end
+        ,m.enrolled_months
+        ,m.enrollment_window_months
+
+        -- LEFT BOUNDARY
+        -- Rule 1: enrolled at least 12 months before trigger
+        ,CASE
+            WHEN DATE_DIFF(f.trigger_date, m.enrollment_start, DAY) >= 365
+            THEN TRUE ELSE FALSE
+         END                                             AS rule1_enrolled_12m
+
+        -- Rule 2: DX not seen in 12 months before trigger
+        ,CASE
+            WHEN EXISTS (
+                SELECT 1 FROM dx_history d
+                WHERE d.member_id = f.member_id
+                  AND d.dx_clean = f.trigger_dx_clean
+                  AND d.visit_date >= DATE_SUB(f.trigger_date, INTERVAL 365 DAY)
+                  AND d.visit_date < f.trigger_date
+            ) THEN FALSE ELSE TRUE
+         END                                             AS rule2_dx_not_seen_12m
+
+        -- Informational flag
+        ,CASE
+            WHEN EXISTS (
+                SELECT 1 FROM dx_history d
+                WHERE d.member_id = f.member_id
+                  AND d.visit_date >= DATE_SUB(f.trigger_date, INTERVAL 365 DAY)
+                  AND d.visit_date < f.trigger_date
+            ) THEN TRUE ELSE FALSE
+         END                                             AS has_claims_12m_before
+
+        -- RIGHT BOUNDARY
+        ,CASE
+            WHEN f.trigger_date <= DATE '2025-11-30'
+             AND m.enrollment_end >= DATE_ADD(f.trigger_date, INTERVAL 30 DAY)
+            THEN TRUE ELSE FALSE
+         END                                             AS is_t30_right_qualified
+
+        ,CASE
+            WHEN f.trigger_date <= DATE '2025-10-31'
+             AND m.enrollment_end >= DATE_ADD(f.trigger_date, INTERVAL 60 DAY)
+            THEN TRUE ELSE FALSE
+         END                                             AS is_t60_right_qualified
+
+        ,CASE
+            WHEN f.trigger_date <= DATE '2025-06-30'
+             AND m.enrollment_end >= DATE_ADD(f.trigger_date, INTERVAL 180 DAY)
+            THEN TRUE ELSE FALSE
+         END                                             AS is_t180_right_qualified
+
+    FROM first_encounters f
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_member_qualified` m
+        ON f.member_id = m.member_id
+)
+SELECT
+    member_id
+    ,trigger_date
+    ,trigger_rank
+    ,trigger_dx
+    ,trigger_dx_clean
+    ,trigger_ccsr
+    ,trigger_ccsr_desc
+    ,trigger_specialty
+    ,trigger_specialty_desc
+    ,age_nbr
+    ,gender_cd
+    ,member_segment
+    ,enrollment_start
+    ,enrollment_end
+    ,enrolled_months
+    ,enrollment_window_months
+    ,rule1_enrolled_12m
+    ,rule2_dx_not_seen_12m
+    ,has_claims_12m_before
+
+    -- FINAL QUALIFICATION FLAGS
+    ,CASE
+        WHEN rule1_enrolled_12m AND rule2_dx_not_seen_12m
+        THEN TRUE ELSE FALSE
+     END                                                 AS is_left_qualified
+
+    ,CASE
+        WHEN rule1_enrolled_12m AND rule2_dx_not_seen_12m
+             AND is_t30_right_qualified
+        THEN TRUE ELSE FALSE
+     END                                                 AS is_t30_qualified
+
+    ,CASE
+        WHEN rule1_enrolled_12m AND rule2_dx_not_seen_12m
+             AND is_t60_right_qualified
+        THEN TRUE ELSE FALSE
+     END                                                 AS is_t60_qualified
+
+    ,CASE
+        WHEN rule1_enrolled_12m AND rule2_dx_not_seen_12m
+             AND is_t180_right_qualified
+        THEN TRUE ELSE FALSE
+     END                                                 AS is_t180_qualified
+
+FROM boundary_checks
+;
