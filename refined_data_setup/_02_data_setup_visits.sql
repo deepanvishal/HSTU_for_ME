@@ -76,7 +76,14 @@ LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` sp
     AND LOWER(sp.lookup_column_nm) = 'specialty_ctg_cd'
 ;
 
-
+-- ============================================================
+-- TABLE 4 — A870800_gen_rec_triggers_qualified
+-- Purpose : Identifies first encounter of each diagnosis per member
+--           and applies left and right boundary qualification rules
+-- Source  : A870800_gen_rec_visits + A870800_gen_rec_member_qualified
+-- Output  : One row per member + trigger_date + trigger_dx
+--           with qualification flags per time window
+-- ============================================================
 DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers_qualified`;
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers_qualified`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
