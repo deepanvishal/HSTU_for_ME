@@ -1,21 +1,22 @@
 -- ============================================================
 -- TABLE 6 — A870800_gen_rec_model_input_sequences
 -- Purpose : Model training input — pre-trigger visit sequence
---           and post-trigger specialty labels per window
+--           paired with post-trigger specialty labels
 -- Source  : A870800_gen_rec_triggers_qualified
 --           + A870800_gen_rec_visits
 --           + A870800_gen_rec_visits_qualified
--- Output  : One row per member + trigger
---           visit_sequence = T180 visits BEFORE trigger as ARRAY
---           label_t30/t60/t180 = first specialist AFTER trigger
+-- Output  : One row per member + trigger + downstream specialty visit
+--           visit_sequence = T180 visits BEFORE trigger as ARRAY STRUCT
+--           label_specialty = specialty visited after trigger
+--           time_bucket = T0_30 / T30_60 / T60_180
 -- ============================================================
 DROP TABLE IF EXISTS `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_model_input_sequences`;
 CREATE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_model_input_sequences`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
 WITH pre_trigger_flat AS (
-    -- All visits within T180 BEFORE trigger — flat rows with delta_t computed
-    -- delta_t_bucket computed here using LAG before aggregation
+    -- All visits within T180 BEFORE trigger date
+    -- Flat rows with delta_t_bucket computed via LAG before aggregation
     SELECT
         t.member_id
         ,t.trigger_date
@@ -38,8 +39,9 @@ WITH pre_trigger_flat AS (
         ,v.dx_clean                                      AS visit_dx_clean
         ,v.ccsr_category
         ,v.ccsr_category_description
-        -- delta_t = days since prior visit in sequence
-        -- log-scale bucketed per HSTU paper: floor(log(max(1, delta_t)) / 0.301)
+        -- Log-scale delta_t bucket per HSTU paper
+        -- floor(log(max(1, days_since_prior_visit)) / 0.301)
+        -- NULL for first visit in sequence — no prior visit
         ,CAST(FLOOR(
             LOG(GREATEST(1,
                 DATE_DIFF(v.visit_date,
@@ -57,7 +59,7 @@ WITH pre_trigger_flat AS (
     WHERE t.is_left_qualified = TRUE
 ),
 pre_trigger AS (
-    -- Aggregate flat rows into ARRAY STRUCT per member + trigger
+    -- Aggregate flat pre-trigger rows into ARRAY STRUCT per member + trigger
     SELECT
         member_id
         ,trigger_date
@@ -94,88 +96,36 @@ pre_trigger AS (
         ,is_t30_qualified, is_t60_qualified, is_t180_qualified
         ,has_claims_12m_before
 ),
--- First specialist label per window
--- Uses earliest visit date after V2 within window
--- to avoid alphabetical MIN issue on specialty code
-first_post_v2_visit AS (
-    SELECT
-        member_id
-        ,trigger_date
-        ,trigger_dx
-        ,time_window
-        ,specialty_ctg_cd
-        ,specialty_desc
-    FROM (
-        SELECT
-            v.member_id
-            ,v.trigger_date
-            ,v.trigger_dx
-            ,v.specialty_ctg_cd
-            ,v.specialty_desc
-            ,'T30'                                       AS time_window
-        FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits_qualified` v
-        WHERE v.is_v2 = FALSE
-          AND v.days_since_trigger <= 30
-          AND v.specialty_ctg_cd IS NOT NULL
-          AND v.is_t30_qualified = TRUE
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY v.member_id, v.trigger_date, v.trigger_dx
-            ORDER BY v.days_since_trigger
-        ) = 1
-
-        UNION ALL
-
-        SELECT
-            v.member_id
-            ,v.trigger_date
-            ,v.trigger_dx
-            ,v.specialty_ctg_cd
-            ,v.specialty_desc
-            ,'T60'                                       AS time_window
-        FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits_qualified` v
-        WHERE v.is_v2 = FALSE
-          AND v.days_since_trigger <= 60
-          AND v.specialty_ctg_cd IS NOT NULL
-          AND v.is_t60_qualified = TRUE
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY v.member_id, v.trigger_date, v.trigger_dx
-            ORDER BY v.days_since_trigger
-        ) = 1
-
-        UNION ALL
-
-        SELECT
-            v.member_id
-            ,v.trigger_date
-            ,v.trigger_dx
-            ,v.specialty_ctg_cd
-            ,v.specialty_desc
-            ,'T180'                                      AS time_window
-        FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits_qualified` v
-        WHERE v.is_v2 = FALSE
-          AND v.days_since_trigger <= 180
-          AND v.specialty_ctg_cd IS NOT NULL
-          AND v.is_t180_qualified = TRUE
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY v.member_id, v.trigger_date, v.trigger_dx
-            ORDER BY v.days_since_trigger
-        ) = 1
-    )
-),
-labels AS (
-    -- Pivot time windows into columns
-    SELECT
-        member_id
-        ,trigger_date
-        ,trigger_dx
-        ,MAX(CASE WHEN time_window = 'T30'  THEN specialty_ctg_cd END) AS label_t30
-        ,MAX(CASE WHEN time_window = 'T60'  THEN specialty_ctg_cd END) AS label_t60
-        ,MAX(CASE WHEN time_window = 'T180' THEN specialty_ctg_cd END) AS label_t180
-        ,MAX(CASE WHEN time_window = 'T30'  THEN specialty_desc END)   AS label_t30_desc
-        ,MAX(CASE WHEN time_window = 'T60'  THEN specialty_desc END)   AS label_t60_desc
-        ,MAX(CASE WHEN time_window = 'T180' THEN specialty_desc END)   AS label_t180_desc
-    FROM first_post_v2_visit
-    GROUP BY member_id, trigger_date, trigger_dx
+post_trigger_labels AS (
+    -- All downstream specialty visits after trigger within T180
+    -- One row per member + trigger + specialty visit
+    -- time_bucket assigned based on days_since_trigger
+    -- Only include buckets the trigger is qualified for
+    SELECT DISTINCT
+        v.member_id
+        ,v.trigger_date
+        ,v.trigger_dx
+        ,v.specialty_ctg_cd                              AS label_specialty
+        ,v.specialty_desc                                AS label_specialty_desc
+        ,v.days_since_trigger
+        ,CASE
+            WHEN v.days_since_trigger <= 30              THEN 'T0_30'
+            WHEN v.days_since_trigger <= 60              THEN 'T30_60'
+            WHEN v.days_since_trigger <= 180             THEN 'T60_180'
+         END                                             AS time_bucket
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits_qualified` v
+    WHERE v.specialty_ctg_cd IS NOT NULL
+      AND v.is_v2 = FALSE
+      -- Only include rows where trigger qualifies for that bucket
+      AND (
+          (v.days_since_trigger <= 30  AND v.is_t30_qualified  = TRUE)
+       OR (v.days_since_trigger <= 60
+           AND v.days_since_trigger > 30
+           AND v.is_t60_qualified  = TRUE)
+       OR (v.days_since_trigger <= 180
+           AND v.days_since_trigger > 60
+           AND v.is_t180_qualified = TRUE)
+      )
 )
 SELECT
     p.member_id
@@ -192,14 +142,12 @@ SELECT
     ,p.is_t180_qualified
     ,p.has_claims_12m_before
     ,p.visit_sequence
-    ,l.label_t30
-    ,l.label_t30_desc
-    ,l.label_t60
-    ,l.label_t60_desc
-    ,l.label_t180
-    ,l.label_t180_desc
+    ,l.label_specialty
+    ,l.label_specialty_desc
+    ,l.time_bucket
+    ,l.days_since_trigger                                AS days_to_specialty
 FROM pre_trigger p
-LEFT JOIN labels l
+JOIN post_trigger_labels l
     ON p.member_id = l.member_id
     AND p.trigger_date = l.trigger_date
     AND p.trigger_dx = l.trigger_dx
