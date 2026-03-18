@@ -129,7 +129,7 @@ GROUP BY year
 ORDER BY year
 """).to_dataframe()
 
-yearly = members_year.merge(claimants_year, on="year", how="outer").fillna(0)
+yearly = members_year.merge(claimants_year, on="year", how="inner").fillna(0)
 yearly_display = yearly.copy()
 yearly_display["enrolled_members"] = yearly_display["enrolled_members"].apply(fmt_count)
 yearly_display["claimants"] = yearly_display["claimants"].apply(fmt_count)
