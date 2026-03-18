@@ -454,4 +454,243 @@ top15_vol = spec_vol.head(15).sort_values("visit_count", ascending=True)
 axes[0].barh(top15_vol["specialty_desc"], top15_vol["visit_count"],
              color="#4C9BE8", alpha=0.85)
 axes[0].set_xlabel("Total Visits", fontsize=9)
-axes[0].set_title("Top 15 Specialties by
+axes[0].set_title("Top 15 Specialties by Visit Volume", fontsize=11, fontweight="bold")
+axes[0].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: fmt_count(x)))
+plt.setp(axes[0].get_yticklabels(), fontsize=8)
+
+top15_spend = spec_vol.sort_values("total_allowed_amt", ascending=False).head(15)\
+              .sort_values("total_allowed_amt", ascending=True)
+axes[1].barh(top15_spend["specialty_desc"], top15_spend["total_allowed_amt"] / 1_000_000,
+             color="#F4845F", alpha=0.85)
+axes[1].set_xlabel("Total Spend (USD M)", fontsize=9)
+axes[1].set_title("Top 15 Specialties by Total Spend", fontsize=11, fontweight="bold")
+axes[1].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:.1f}M"))
+plt.setp(axes[1].get_yticklabels(), fontsize=8)
+
+fig.suptitle("Specialty Volume and Spend — South Florida 2022-2025",
+             fontsize=13, fontweight="bold")
+plt.tight_layout()
+plt.savefig("specialty_volume_spend.png", dpi=150, bbox_inches="tight")
+plt.show()
+
+
+# ── 3.4 PLACE OF SERVICE ──────────────────────────────────────────────────────
+display(Markdown("""
+### 3.4 Place of Service Distribution
+
+Where are members receiving care — office, outpatient, inpatient, telehealth?
+
+Place of service affects the clinical interpretation of visits.
+Emergency room visits (POS 23) represent unplanned care and are typically
+excluded from care pathway analysis. Office visits represent planned care.
+"""))
+
+pos_dist = client.query(f"""
+SELECT
+    CAST(plc_srv_cd AS STRING)                           AS plc_srv_cd
+    ,COUNT(DISTINCT CONCAT(member_id, '_',
+        CAST(visit_date AS STRING)))                     AS visit_count
+    ,ROUND(SUM(allowed_amt), 2)                          AS total_allowed_amt
+FROM {VISITS}
+WHERE plc_srv_cd IS NOT NULL
+GROUP BY plc_srv_cd
+ORDER BY visit_count DESC
+LIMIT 15
+""").to_dataframe()
+
+fig, axes = plt.subplots(1, 2, figsize=(22, 8))
+pos_vol = pos_dist.sort_values("visit_count", ascending=True)
+axes[0].barh(pos_vol["plc_srv_cd"], pos_vol["visit_count"],
+             color="#4C9BE8", alpha=0.85)
+axes[0].set_xlabel("Total Visits", fontsize=9)
+axes[0].set_title("Top 15 Place of Service by Volume", fontsize=11, fontweight="bold")
+axes[0].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: fmt_count(x)))
+
+pos_spend = pos_dist.sort_values("total_allowed_amt", ascending=True)
+axes[1].barh(pos_spend["plc_srv_cd"], pos_spend["total_allowed_amt"] / 1_000_000,
+             color="#F4845F", alpha=0.85)
+axes[1].set_xlabel("Total Spend (USD M)", fontsize=9)
+axes[1].set_title("Top 15 Place of Service by Spend", fontsize=11, fontweight="bold")
+axes[1].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:.1f}M"))
+
+fig.suptitle("Place of Service Distribution — South Florida 2022-2025",
+             fontsize=13, fontweight="bold")
+plt.tight_layout()
+plt.savefig("place_of_service.png", dpi=150, bbox_inches="tight")
+plt.show()
+
+
+# ── 3.5 TOP DIAGNOSIS CODES ───────────────────────────────────────────────────
+display(Markdown("""
+### 3.5 Top Diagnosis Codes by Volume
+
+Which ICD-10 codes appear most frequently across all visits?
+
+The long tail of ICD-10 codes is one of the central challenges of this analysis —
+over 70,000 codes exist, but a small number dominate visit volume.
+This chart shows the top 20 and gives a sense of concentration.
+"""))
+
+dx_vol = client.query(f"""
+SELECT
+    dx_raw
+    ,MAX(COALESCE(d.icd9_dx_dscrptn, dx_raw))           AS dx_desc
+    ,COUNT(*)                                            AS visit_count
+    ,COUNT(DISTINCT member_id)                           AS unique_members
+FROM {VISITS} v
+LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.ICD9_DIAGNOSIS` d
+    ON v.dx_raw = d.icd9_dx_cd
+WHERE dx_raw IS NOT NULL
+GROUP BY dx_raw
+ORDER BY visit_count DESC
+LIMIT 20
+""").to_dataframe()
+
+fig, ax = plt.subplots(figsize=(14, 9))
+dx_plot = dx_vol.sort_values("visit_count", ascending=True)
+ax.barh(dx_plot["dx_desc"].str[:50], dx_plot["visit_count"],
+        color="#4C9BE8", alpha=0.85)
+ax.set_xlabel("Total Visits", fontsize=10)
+ax.set_title("Top 20 Diagnosis Codes by Visit Volume", fontsize=12, fontweight="bold")
+ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: fmt_count(x)))
+plt.setp(ax.get_yticklabels(), fontsize=8)
+plt.tight_layout()
+plt.savefig("top_dx.png", dpi=150, bbox_inches="tight")
+plt.show()
+
+
+# ── 3.6 CCSR DOMAIN DISTRIBUTION ─────────────────────────────────────────────
+display(Markdown("""
+### 3.6 CCSR Clinical Domain Distribution
+
+CCSR groups ICD-10 codes into approximately 530 clinical categories.
+This view shows which clinical domains dominate the visit landscape.
+
+CCSR is used in this analysis purely for EDA — to reduce dimensionality
+and identify which clinical areas carry the strongest predictive signal.
+It is not a model feature.
+
+Domains with high visit volume and consistent specialty routing are the
+strongest candidates for the modeling scope.
+"""))
+
+ccsr_vol = client.query(f"""
+SELECT
+    ccsr_category
+    ,ccsr_category_description
+    ,COUNT(*)                                            AS visit_count
+    ,COUNT(DISTINCT member_id)                           AS unique_members
+    ,ROUND(SUM(allowed_amt), 2)                          AS total_allowed_amt
+FROM {VISITS}
+WHERE ccsr_category IS NOT NULL
+GROUP BY ccsr_category, ccsr_category_description
+ORDER BY visit_count DESC
+LIMIT 15
+""").to_dataframe()
+
+fig, axes = plt.subplots(1, 2, figsize=(24, 9))
+ccsr_v = ccsr_vol.sort_values("visit_count", ascending=True)
+axes[0].barh(ccsr_v["ccsr_category_description"].str[:40], ccsr_v["visit_count"],
+             color="#4C9BE8", alpha=0.85)
+axes[0].set_xlabel("Total Visits", fontsize=9)
+axes[0].set_title("Top 15 CCSR Domains by Volume", fontsize=11, fontweight="bold")
+axes[0].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: fmt_count(x)))
+plt.setp(axes[0].get_yticklabels(), fontsize=8)
+
+ccsr_s = ccsr_vol.sort_values("total_allowed_amt", ascending=True)
+axes[1].barh(ccsr_s["ccsr_category_description"].str[:40],
+             ccsr_s["total_allowed_amt"] / 1_000_000,
+             color="#F4845F", alpha=0.85)
+axes[1].set_xlabel("Total Spend (USD M)", fontsize=9)
+axes[1].set_title("Top 15 CCSR Domains by Spend", fontsize=11, fontweight="bold")
+axes[1].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:.1f}M"))
+plt.setp(axes[1].get_yticklabels(), fontsize=8)
+
+fig.suptitle("CCSR Clinical Domain Distribution — South Florida 2022-2025",
+             fontsize=13, fontweight="bold")
+plt.tight_layout()
+plt.savefig("ccsr_domains.png", dpi=150, bbox_inches="tight")
+plt.show()
+
+
+# ── 3.7 MEMBER CONTINUITY ─────────────────────────────────────────────────────
+display(Markdown("""
+### 3.7 Member Continuity Across Years
+
+How many members appear in each combination of years?
+
+Members who appear in 2022 and 2024 but not 2023 may have disenrolled
+and re-enrolled, or may have received care outside the network in 2023.
+This affects the reliability of the left boundary lookback check.
+
+Members consistently present across all four years are the most reliable
+population for analysis.
+"""))
+
+continuity = client.query(f"""
+WITH member_years AS (
+    SELECT
+        member_id
+        ,EXTRACT(YEAR FROM srv_start_dt)                 AS claim_year
+    FROM {RAW}
+    GROUP BY member_id, claim_year
+),
+pivoted AS (
+    SELECT
+        member_id
+        ,MAX(CASE WHEN claim_year = 2022 THEN 1 ELSE 0 END) AS y2022
+        ,MAX(CASE WHEN claim_year = 2023 THEN 1 ELSE 0 END) AS y2023
+        ,MAX(CASE WHEN claim_year = 2024 THEN 1 ELSE 0 END) AS y2024
+        ,MAX(CASE WHEN claim_year = 2025 THEN 1 ELSE 0 END) AS y2025
+    FROM member_years
+    GROUP BY member_id
+)
+SELECT
+    CONCAT(
+        CASE WHEN y2022=1 THEN '2022 ' ELSE '' END,
+        CASE WHEN y2023=1 THEN '2023 ' ELSE '' END,
+        CASE WHEN y2024=1 THEN '2024 ' ELSE '' END,
+        CASE WHEN y2025=1 THEN '2025' ELSE '' END
+    )                                                    AS years_present
+    ,COUNT(*)                                            AS member_count
+FROM pivoted
+GROUP BY years_present
+ORDER BY member_count DESC
+LIMIT 15
+""").to_dataframe()
+
+continuity["member_count_fmt"] = continuity["member_count"].apply(fmt_count)
+display(continuity[["years_present", "member_count_fmt"]].rename(columns={
+    "years_present": "Years Present",
+    "member_count_fmt": "Member Count"
+}).reset_index(drop=True))
+
+fig, ax = plt.subplots(figsize=(14, 7))
+cont_plot = continuity.sort_values("member_count", ascending=True)
+ax.barh(cont_plot["years_present"], cont_plot["member_count"],
+        color="#4C9BE8", alpha=0.85)
+ax.set_xlabel("Member Count", fontsize=10)
+ax.set_title("Member Continuity Across Years", fontsize=12, fontweight="bold")
+ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: fmt_count(x)))
+plt.setp(ax.get_yticklabels(), fontsize=9)
+ax.grid(axis="x", linestyle="--", alpha=0.4)
+plt.tight_layout()
+plt.savefig("member_continuity.png", dpi=150, bbox_inches="tight")
+plt.show()
+
+display(Markdown("""
+---
+## Chapter 3 Summary
+
+Key findings from visit characteristics that inform modeling decisions:
+
+- **Sequence length:** The visit distribution determines whether the 20-visit cap is appropriate
+- **Delta-t bucketing:** The time-between-visits distribution informs HSTU temporal encoding
+- **FP/I dominance:** Whether Family Practice and Internal Medicine dominate visit volume validates the FP-first analytical lens
+- **Data concentration:** The top 20 ICD-10 codes and CCSR domains show how concentrated the signal is
+- **Member continuity:** Gaps in member activity years flag potential data reliability issues
+
+These findings are carried forward into NB 02 — Boundary Rules and NB 03 — Boundary Impact.
+
+---
+"""))
