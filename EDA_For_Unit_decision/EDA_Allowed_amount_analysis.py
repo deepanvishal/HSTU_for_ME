@@ -22,6 +22,30 @@ for col in ["transition_count", "unique_members", "conditional_probability",
             "avg_allowed_per_transition", "avg_allowed_per_member"]:
     df[col] = df[col].astype(float)
 
+df["member_density"] = (df["unique_members"] / df["transition_count"]).round(3)
+
+
+def fmt_millions(x):
+    return f"${x/1_000_000:.2f}M"
+
+def fmt_usd(x):
+    return f"${x:,.0f}"
+
+def fmt_count(x):
+    return f"{x:,.0f}"
+
+def style_table(df_display):
+    return df_display.style.format({
+        col: fmt_millions for col in df_display.columns if "Total Spend" in col
+    } | {
+        col: fmt_usd for col in df_display.columns
+        if any(k in col for k in ["Avg Spend", "Avg Cost", "Per Member", "Per Visit"])
+    } | {
+        col: fmt_count for col in df_display.columns
+        if any(k in col for k in ["Transitions", "Members", "Count"])
+    })
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ANALYSIS 1 — PARETO ON TOTAL COST
 # ══════════════════════════════════════════════════════════════════════════════
@@ -39,6 +63,9 @@ The 80% threshold is a standard Pareto cutoff — a small number of transitions
 typically drive the majority of cost. Understanding which transitions these are
 directly informs care navigation prioritization and network adequacy planning.
 
+Total spend figures are shown in millions USD. Per-member and per-visit figures
+are shown in USD.
+
 ---
 """))
 
@@ -51,13 +78,10 @@ transition_agg = (
          total_allowed_amt=("total_allowed_amt", "sum"),
          avg_allowed_per_member=("avg_allowed_per_member", "mean"),
          conditional_entropy=("conditional_entropy", "mean"),
-         conditional_probability=("conditional_probability", "mean"))
+         conditional_probability=("conditional_probability", "mean"),
+         member_density=("member_density", "mean"))
     .sort_values("total_allowed_amt", ascending=False)
 )
-
-transition_agg["member_density"] = (
-    transition_agg["unique_members"] / transition_agg["transition_count"]
-).round(3)
 
 total_spend = transition_agg["total_allowed_amt"].sum()
 transition_agg["cumulative_spend"] = transition_agg["total_allowed_amt"].cumsum()
@@ -66,10 +90,10 @@ pareto_df = transition_agg[transition_agg["cumulative_pct"] <= 0.80].copy()
 
 display(Markdown(f"""
 **Total transitions:** {len(transition_agg):,}
-**Total allowed spend:** ${total_spend:,.0f}
+**Total allowed spend:** {fmt_millions(total_spend)}
 **Transitions in 80% spend:** {len(pareto_df):,} ({len(pareto_df)/len(transition_agg)*100:.1f}% of all transitions)
 
-This means **{len(pareto_df)/len(transition_agg)*100:.1f}% of transition pairs drive 80% of total spend**.
+**{len(pareto_df)/len(transition_agg)*100:.1f}% of transition pairs drive 80% of total spend.**
 The remaining {100 - len(pareto_df)/len(transition_agg)*100:.1f}% are low-cost long-tail transitions.
 All analyses below focus on this high-value set.
 """))
@@ -78,8 +102,8 @@ All analyses below focus on this high-value set.
 display(Markdown("""
 #### Pareto Curve — Cumulative Spend Concentration
 
-Shows how quickly total allowed spend concentrates in the top transitions when ranked by cost.
-The steeper the curve, the more concentrated the spend.
+Shows how quickly total allowed spend concentrates in the top transitions when
+ranked by cost. The steeper the curve, the more concentrated the spend.
 The red line marks the 80% threshold used to define the high-value transition set.
 """))
 
@@ -107,9 +131,11 @@ display(Markdown("""
 ### Most Impactful Starting Diagnoses — Volume and Spend
 
 Each diagnosis is ranked by total allowed spend within the 80% pareto set.
+Total spend shown in millions USD.
 Member density shows what fraction of transitions are from unique members —
-a density close to 1.0 means most transitions represent different members (generalizable signal).
-A low density means the same members are generating repeat transitions (concentrated signal).
+a density close to 1.0 means most transitions represent different members
+(generalizable signal). A low density means the same members are generating
+repeat transitions (concentrated signal).
 """))
 
 dx_summary = (
@@ -125,7 +151,7 @@ dx_summary = (
     .head(20)
 )
 
-display(dx_summary[[
+dx_display = dx_summary[[
     "current_dx_desc", "current_ccsr_desc", "total_transitions",
     "unique_members", "total_allowed_amt", "avg_allowed_per_member",
     "avg_entropy", "avg_member_density"
@@ -134,11 +160,20 @@ display(dx_summary[[
     "current_ccsr_desc": "Clinical Domain",
     "total_transitions": "Total Transitions",
     "unique_members": "Unique Members",
-    "total_allowed_amt": "Total Spend ($)",
+    "total_allowed_amt": "Total Spend (USD M)",
     "avg_allowed_per_member": "Avg Spend Per Member ($)",
     "avg_entropy": "Avg Entropy",
     "avg_member_density": "Member Density"
-}).reset_index(drop=True))
+}).reset_index(drop=True)
+
+display(dx_display.style.format({
+    "Total Spend (USD M)": lambda x: fmt_millions(x),
+    "Avg Spend Per Member ($)": lambda x: fmt_usd(x),
+    "Total Transitions": lambda x: fmt_count(x),
+    "Unique Members": lambda x: fmt_count(x),
+    "Avg Entropy": "{:.4f}",
+    "Member Density": "{:.3f}"
+}))
 
 fig, axes = plt.subplots(1, 2, figsize=(24, 10))
 dx_vol = dx_summary.sort_values("total_transitions", ascending=True).tail(15)
@@ -150,11 +185,11 @@ axes[0].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x:,.0f}")
 plt.setp(axes[0].get_yticklabels(), fontsize=8)
 
 dx_spend = dx_summary.sort_values("total_allowed_amt", ascending=True).tail(15)
-axes[1].barh(dx_spend["current_dx_desc"], dx_spend["total_allowed_amt"],
+axes[1].barh(dx_spend["current_dx_desc"], dx_spend["total_allowed_amt"] / 1_000_000,
              color="#F4845F", alpha=0.85)
-axes[1].set_xlabel("Total Allowed Amount ($)", fontsize=10)
+axes[1].set_xlabel("Total Allowed Amount (USD M)", fontsize=10)
 axes[1].set_title("Top 15 Diagnoses by Spend\n(within 80% spend)", fontsize=12, fontweight="bold")
-axes[1].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+axes[1].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:.1f}M"))
 plt.setp(axes[1].get_yticklabels(), fontsize=8)
 
 fig.suptitle("Most Impactful Starting Diagnoses — Pareto Set", fontsize=14, fontweight="bold")
@@ -167,6 +202,7 @@ display(Markdown("""
 ### Most Impactful Destination Specialties — Volume and Spend
 
 Each specialty is ranked by total allowed spend within the 80% pareto set.
+Total spend shown in millions USD.
 """))
 
 spec_summary = (
@@ -181,18 +217,27 @@ spec_summary = (
     .head(20)
 )
 
-display(spec_summary[[
+spec_display = spec_summary[[
     "next_specialty_desc", "total_transitions", "unique_members",
     "total_allowed_amt", "avg_allowed_per_member", "avg_entropy", "avg_member_density"
 ]].rename(columns={
     "next_specialty_desc": "Specialty",
     "total_transitions": "Total Transitions",
     "unique_members": "Unique Members",
-    "total_allowed_amt": "Total Spend ($)",
+    "total_allowed_amt": "Total Spend (USD M)",
     "avg_allowed_per_member": "Avg Spend Per Member ($)",
     "avg_entropy": "Avg Entropy",
     "avg_member_density": "Member Density"
-}).reset_index(drop=True))
+}).reset_index(drop=True)
+
+display(spec_display.style.format({
+    "Total Spend (USD M)": lambda x: fmt_millions(x),
+    "Avg Spend Per Member ($)": lambda x: fmt_usd(x),
+    "Total Transitions": lambda x: fmt_count(x),
+    "Unique Members": lambda x: fmt_count(x),
+    "Avg Entropy": "{:.4f}",
+    "Member Density": "{:.3f}"
+}))
 
 fig, axes = plt.subplots(1, 2, figsize=(24, 10))
 spec_vol = spec_summary.sort_values("total_transitions", ascending=True).tail(15)
@@ -204,11 +249,11 @@ axes[0].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x:,.0f}")
 plt.setp(axes[0].get_yticklabels(), fontsize=8)
 
 spec_spend = spec_summary.sort_values("total_allowed_amt", ascending=True).tail(15)
-axes[1].barh(spec_spend["next_specialty_desc"], spec_spend["total_allowed_amt"],
+axes[1].barh(spec_spend["next_specialty_desc"], spec_spend["total_allowed_amt"] / 1_000_000,
              color="#F4845F", alpha=0.85)
-axes[1].set_xlabel("Total Allowed Amount ($)", fontsize=10)
+axes[1].set_xlabel("Total Allowed Amount (USD M)", fontsize=10)
 axes[1].set_title("Top 15 Specialties by Spend\n(within 80% spend)", fontsize=12, fontweight="bold")
-axes[1].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+axes[1].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:.1f}M"))
 plt.setp(axes[1].get_yticklabels(), fontsize=8)
 
 fig.suptitle("Most Impactful Destination Specialties — Pareto Set", fontsize=14, fontweight="bold")
@@ -238,13 +283,14 @@ where the member will go, and the cost impact of routing them correctly is high.
 - **Bottom Left — Noise:** Low probability, low cost. Low priority.
 
 Dot size reflects transition volume. Color reflects entropy — green is more predictable.
+Median probability and median cost per member used as quadrant dividers.
 """))
 
 fig, axes = plt.subplots(2, 2, figsize=(24, 20))
 axes = axes.flatten()
 
-prob_median = pareto_df["conditional_probability"].median()
-cost_median = pareto_df["avg_allowed_per_member"].median()
+prob_median = df["conditional_probability"].median()
+cost_median = df["avg_allowed_per_member"].median()
 
 for i, cohort in enumerate(COHORTS):
     ax = axes[i]
@@ -252,7 +298,6 @@ for i, cohort in enumerate(COHORTS):
     if sub.empty:
         ax.set_title(f"{cohort} — No Data")
         continue
-
     scatter = ax.scatter(
         sub["conditional_probability"],
         sub["avg_allowed_per_member"],
@@ -262,10 +307,8 @@ for i, cohort in enumerate(COHORTS):
         cmap="RdYlGn_r"
     )
     plt.colorbar(scatter, ax=ax, label="Entropy")
-
     ax.axvline(prob_median, color="grey", linestyle="--", alpha=0.5)
     ax.axhline(cost_median, color="grey", linestyle="--", alpha=0.5)
-
     ax.text(0.98, 0.98, "Predictable\nHigh Cost", transform=ax.transAxes,
             ha="right", va="top", fontsize=8, color="red", fontweight="bold")
     ax.text(0.02, 0.98, "Unpredictable\nHigh Cost", transform=ax.transAxes,
@@ -274,11 +317,10 @@ for i, cohort in enumerate(COHORTS):
             ha="right", va="bottom", fontsize=8, color="green", fontweight="bold")
     ax.text(0.02, 0.02, "Noise", transform=ax.transAxes,
             ha="left", va="bottom", fontsize=8, color="grey", fontweight="bold")
-
     ax.set_xlabel("Conditional Probability", fontsize=9)
     ax.set_ylabel("Avg Allowed Per Member ($)", fontsize=9)
     ax.set_title(f"{cohort}", fontsize=12, fontweight="bold")
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: fmt_usd(x)))
     ax.grid(True, linestyle="--", alpha=0.3)
 
 fig.suptitle("Predictability vs Cost Quadrant — First Encounter Transitions",
@@ -307,23 +349,26 @@ the signal may be concentrated in a small high-utilizer population.
 High density transitions produce more generalizable model predictions.
 Low density transitions may overfit to a small group of high-utilizers.
 
-This chart shows the top 20 transitions in the pareto set ranked by member density.
+Left chart shows transitions with highest density — broadest population signal.
+Right chart shows transitions with lowest density — concentrated in few members.
 """))
 
-density_top = (
-    pareto_df.sort_values("member_density", ascending=False)
-    .head(20)
-    .copy()
-)
+density_top = pareto_df.sort_values("member_density", ascending=False).head(20).copy()
 density_top["transition_label"] = (
     density_top["current_dx_desc"].str[:25] + " → " +
     density_top["next_specialty_desc"].str[:20]
 )
 
+density_low = pareto_df.sort_values("member_density", ascending=True).head(20).copy()
+density_low["transition_label"] = (
+    density_low["current_dx_desc"].str[:25] + " → " +
+    density_low["next_specialty_desc"].str[:20]
+)
+
 fig, axes = plt.subplots(1, 2, figsize=(24, 10))
 
-density_high = density_top.sort_values("member_density", ascending=True)
-axes[0].barh(density_high["transition_label"], density_high["member_density"],
+d_high = density_top.sort_values("member_density", ascending=True)
+axes[0].barh(d_high["transition_label"], d_high["member_density"],
              color="#5DBE7E", alpha=0.85)
 axes[0].set_xlabel("Member Density (unique members / transitions)", fontsize=9)
 axes[0].set_title("Highest Member Density\n(most generalizable transitions)",
@@ -332,12 +377,8 @@ axes[0].axvline(1.0, color="red", linestyle="--", alpha=0.5, label="Density = 1.
 axes[0].legend(fontsize=8)
 plt.setp(axes[0].get_yticklabels(), fontsize=7)
 
-density_low = pareto_df.sort_values("member_density", ascending=True).head(20)
-density_low["transition_label"] = (
-    density_low["current_dx_desc"].str[:25] + " → " +
-    density_low["next_specialty_desc"].str[:20]
-)
-axes[1].barh(density_low["transition_label"], density_low["member_density"],
+d_low = density_low.sort_values("member_density", ascending=False)
+axes[1].barh(d_low["transition_label"], d_low["member_density"],
              color="#F4845F", alpha=0.85)
 axes[1].set_xlabel("Member Density (unique members / transitions)", fontsize=9)
 axes[1].set_title("Lowest Member Density\n(concentrated in high-utilizers)",
@@ -365,21 +406,21 @@ Some high-cost pathways may be entirely driven by one cohort — typically Senio
 This has direct implications for:
 - Model scope — should the model be cohort-specific?
 - Care navigation targeting — which population to prioritize
-- Network adequacy — which geographies and demographics need more specialist capacity
+- Network adequacy — which demographics need more specialist capacity
+
+Total spend shown in millions USD. Per-member cost shown in USD.
 """))
 
-top10_transitions = pareto_df.head(10)[["current_dx", "next_specialty"]].values.tolist()
+top10_pairs = pareto_df.head(10)[["current_dx", "next_specialty"]].values.tolist()
 
 top10_cohort = df[
-    df.apply(lambda r: [r["current_dx"], r["next_specialty"]] in top10_transitions, axis=1)
+    df.apply(lambda r: [r["current_dx"], r["next_specialty"]] in top10_pairs, axis=1)
 ].copy()
 
 top10_cohort["transition_label"] = (
     top10_cohort["current_dx_desc"].str[:20] + " → " +
     top10_cohort["next_specialty_desc"].str[:15]
 )
-
-fig, axes = plt.subplots(1, 2, figsize=(26, 12))
 
 pivot_vol = top10_cohort.pivot_table(
     index="transition_label", columns="member_segment",
@@ -393,14 +434,16 @@ pivot_cost = top10_cohort.pivot_table(
 
 cohort_colors = {
     "Adult_Female": "#4C9BE8",
-    "Adult_Male": "#F4845F",
-    "Senior": "#5DBE7E",
-    "Children": "#F7C948"
+    "Adult_Male":   "#F4845F",
+    "Senior":       "#5DBE7E",
+    "Children":     "#F7C948"
 }
-colors = [cohort_colors.get(c, "#AAAAAA") for c in pivot_vol.columns]
+vol_colors  = [cohort_colors.get(c, "#AAAAAA") for c in pivot_vol.columns]
+cost_colors = [cohort_colors.get(c, "#AAAAAA") for c in pivot_cost.columns]
 
-pivot_vol.plot(kind="barh", stacked=True, ax=axes[0],
-               color=colors, alpha=0.85)
+fig, axes = plt.subplots(1, 2, figsize=(26, 12))
+
+pivot_vol.plot(kind="barh", stacked=True, ax=axes[0], color=vol_colors, alpha=0.85)
 axes[0].set_xlabel("Total Transitions", fontsize=9)
 axes[0].set_title("Transition Volume by Cohort\nTop 10 High-Value Transitions",
                   fontsize=11, fontweight="bold")
@@ -408,12 +451,11 @@ axes[0].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x:,.0f}")
 axes[0].legend(title="Cohort", fontsize=8)
 plt.setp(axes[0].get_yticklabels(), fontsize=8)
 
-pivot_cost.plot(kind="barh", ax=axes[1],
-                color=colors, alpha=0.85)
+pivot_cost.plot(kind="barh", ax=axes[1], color=cost_colors, alpha=0.85)
 axes[1].set_xlabel("Avg Allowed Per Member ($)", fontsize=9)
 axes[1].set_title("Average Cost Per Member by Cohort\nTop 10 High-Value Transitions",
                   fontsize=11, fontweight="bold")
-axes[1].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+axes[1].xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: fmt_usd(x)))
 axes[1].legend(title="Cohort", fontsize=8)
 plt.setp(axes[1].get_yticklabels(), fontsize=8)
 
@@ -443,6 +485,8 @@ High per-member cost specialties are important for:
 - Network design — ensuring sufficient in-network capacity to avoid out-of-network costs
 - Care management — identifying members who may need case management intervention
 
+Per-member and per-visit costs shown in USD. Total spend shown in millions USD.
+
 ---
 """))
 
@@ -459,7 +503,8 @@ spec_cost = (
 )
 
 display(Markdown("### Top 15 Most Expensive Specialties Per Member"))
-display(spec_cost[[
+
+spec_cost_display = spec_cost[[
     "next_specialty_desc", "avg_allowed_per_member", "total_transitions",
     "unique_members", "total_allowed_amt", "avg_entropy", "avg_member_density"
 ]].rename(columns={
@@ -467,18 +512,27 @@ display(spec_cost[[
     "avg_allowed_per_member": "Avg Spend Per Member ($)",
     "total_transitions": "Total Transitions",
     "unique_members": "Unique Members",
-    "total_allowed_amt": "Total Spend ($)",
+    "total_allowed_amt": "Total Spend (USD M)",
     "avg_entropy": "Avg Entropy",
     "avg_member_density": "Member Density"
-}).reset_index(drop=True))
+}).reset_index(drop=True)
+
+display(spec_cost_display.style.format({
+    "Total Spend (USD M)": lambda x: fmt_millions(x),
+    "Avg Spend Per Member ($)": lambda x: fmt_usd(x),
+    "Total Transitions": lambda x: fmt_count(x),
+    "Unique Members": lambda x: fmt_count(x),
+    "Avg Entropy": "{:.4f}",
+    "Member Density": "{:.3f}"
+}))
 
 display(Markdown("""
 #### Average Cost Per Member by Specialty
 
 Specialties ranked purely by per-member cost.
 Color intensity reflects cost level — darker red means higher cost.
-Note that some high-cost specialties may have very low transition counts —
-these represent rare but expensive pathways worth monitoring.
+Member count annotated on each bar for context — a high-cost specialty
+with very few members may represent an outlier or niche pathway.
 """))
 
 fig, ax = plt.subplots(figsize=(14, 8))
@@ -491,11 +545,11 @@ bars = ax.barh(spec_plot["next_specialty_desc"], spec_plot["avg_allowed_per_memb
                color=colors, alpha=0.85)
 for bar, (_, row) in zip(bars, spec_plot.iterrows()):
     ax.text(bar.get_width() * 1.01, bar.get_y() + bar.get_height() / 2,
-            f"{row['unique_members']:,.0f} members",
+            f"{fmt_count(row['unique_members'])} members",
             va="center", fontsize=7, color="grey")
 ax.set_xlabel("Average Allowed Amount Per Member ($)", fontsize=10)
 ax.set_title("Most Expensive Specialties Per Member", fontsize=13, fontweight="bold")
-ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: fmt_usd(x)))
 plt.setp(ax.get_yticklabels(), fontsize=9)
 plt.tight_layout()
 plt.savefig("cost_per_member_specialty.png", dpi=150, bbox_inches="tight")
@@ -508,7 +562,8 @@ For each of the top 10 most expensive specialties, the chart below shows which
 diagnosis codes are routing members there and the average cost per member
 for each diagnosis pathway.
 
-This answers: **which conditions are creating the most expensive specialist referrals?**
+**Which conditions are creating the most expensive specialist referrals?**
+Per-member costs shown in USD.
 """))
 
 top_expensive_specs = spec_cost["next_specialty"].head(10).tolist()
@@ -546,7 +601,7 @@ for i, spec in enumerate(top_expensive_specs):
             color=colors, alpha=0.85)
     ax.set_title(f"{spec_desc}", fontsize=9, fontweight="bold")
     ax.set_xlabel("Avg Spend Per Member ($)", fontsize=8)
-    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: fmt_usd(x)))
     plt.setp(ax.get_yticklabels(), fontsize=7)
 
 fig.suptitle("Top 5 Diagnoses Driving Members to High-Cost Specialties",
