@@ -2,14 +2,13 @@
 # NB_02 — Boundary Rules
 # Purpose : Define and justify left and right boundary rules
 #           Visualize each test case as a member timeline
-#           Real member examples to be plugged in later
+#           Explain each case in plain language
 # ============================================================
 from google.cloud import bigquery
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-import matplotlib.lines as mlines
 from IPython.display import display, Markdown
 from datetime import date, timedelta
 
@@ -18,7 +17,6 @@ DATASET = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
 
 DATASET_START = date(2022, 1, 1)
 DATASET_END   = date(2025, 12, 31)
-
 
 display(Markdown("""
 ---
@@ -29,6 +27,9 @@ Not all first encounters are analytically trustworthy.
 This notebook defines the rules that determine which first encounters
 qualify for the analysis — and shows exactly what each rule does
 using member timeline visualizations.
+
+Each timeline is followed by a plain language explanation of what
+the member's situation was and why the verdict is Valid, Invalid, or Partial.
 
 ---
 """))
@@ -195,7 +196,7 @@ def draw_timeline(ax, case_num, title,
         if ds <= c <= de:
             ax.plot(to_x(c), 0.5, "o", color="#4C9BE8", markersize=5, alpha=0.8)
 
-    # dx claims (rule 2 relevant)
+    # dx claims
     for c in dx_claims:
         if ds <= c <= de:
             ax.plot(to_x(c), 0.5, "o", color="#F4845F", markersize=6,
@@ -225,14 +226,14 @@ def draw_timeline(ax, case_num, title,
     ax.text(0.01, 0.14, f"R2: {r2}", transform=ax.transAxes,
             fontsize=7, color=r2c, fontweight="bold")
 
-    # verdict box
+    # verdict
     vc = "#5DBE7E" if verdict == "Valid" else "#F4845F" if verdict == "Invalid" else "#F7C948"
     ax.text(0.99, 0.18, verdict, transform=ax.transAxes,
             fontsize=8, color=vc, fontweight="bold", ha="right")
     ax.text(0.99, 0.10, verdict_reason, transform=ax.transAxes,
-            fontsize=5.5, color="#555555", ha="right", wrap=True)
+            fontsize=5.5, color="#555555", ha="right")
 
-    ax.set_title(f"Case {case_num}: {title}", fontsize=8, fontweight="bold", pad=2)
+    ax.set_title(f"Case {case_num}: {title}", fontsize=8, fontweight="bold", pad=4)
 
 
 # ── LEFT BOUNDARY TEST CASES ──────────────────────────────────────────────────
@@ -337,27 +338,144 @@ left_cases = [
 display(Markdown("""
 ### Left Boundary — 12 Test Cases
 
-Each timeline shows:
-- **Grey bar** — enrollment period
-- **Blue shaded** — 12-month lookback window before trigger
-- **Blue dots** — regular claims
-- **Red dots** — claims with trigger DX code (Rule 2 relevant)
-- **Orange arrow** — trigger date
-- **R1 / R2** — rule pass (green ✓) or fail (red ✗)
-- **Verdict** — Valid / Invalid / Partial
+**How to read the timelines:**
+- **Grey bar** — full enrollment period from membership records
+- **Blue shaded region** — 12-month lookback window before trigger date
+- **Blue dots** — regular claims in the member's history
+- **Red dots** — claims where the trigger diagnosis code appears (Rule 2 relevant)
+- **Orange arrow** — trigger date (first encounter of the diagnosis)
+- **Grey dotted line** — enrollment end date
+- **R1 ✓/✗** — Rule 1 pass or fail (enrolled 12 months before trigger)
+- **R2 ✓/✗** — Rule 2 pass or fail (DX not seen in lookback window)
+- **Verdict** — green Valid, red Invalid
 """))
 
-fig, axes = plt.subplots(4, 3, figsize=(22, 20))
+fig, axes = plt.subplots(4, 3, figsize=(22, 22))
 axes = axes.flatten()
 
 for i, case in enumerate(left_cases):
     draw_timeline(axes[i], **case, show_lookback=True)
 
 fig.suptitle("Left Boundary Test Cases — Member Timelines",
-             fontsize=14, fontweight="bold")
-plt.tight_layout()
+             fontsize=14, fontweight="bold", y=1.01)
+plt.tight_layout(rect=[0, 0, 1, 0.99])
 plt.savefig("left_boundary_cases.png", dpi=150, bbox_inches="tight")
 plt.show()
+
+
+display(Markdown("""
+### Left Boundary — Case by Case Explanation
+
+---
+
+**Case 1 — Valid**
+Member enrolled January 2022. Has claims in 2022 and 2023.
+Diabetes (E11.9) appears for the first time in February 2024.
+Rule 1 passes — enrolled more than 12 months before February 2024.
+Rule 2 passes — E11.9 not seen anywhere in the 12 months before trigger.
+This is a clean, reliable first encounter.
+
+---
+
+**Case 2 — Invalid**
+Member enrolled January 2022 but the trigger occurs in March 2022 —
+only 2 months after enrollment. Rule 1 fails immediately.
+We have almost no claims history to confirm the diagnosis is new.
+Any trigger in 2022 will fail Rule 1 because the dataset starts in January 2022
+and 12 months of lookback are not available until January 2023.
+
+---
+
+**Case 3 — Invalid**
+Member enrolled January 2024 and the trigger occurs June 2024.
+Only 5 months of enrollment before the trigger. Rule 1 fails.
+This member may have had prior diagnoses at a different insurer that we cannot see.
+
+---
+
+**Case 4 — Valid**
+Member enrolled January 2022. Claims in March and September 2022.
+Hypertension (I10) first appears in May 2023.
+Rule 1 passes — enrolled 16 months before the trigger.
+Rule 2 passes — I10 not seen in the prior 12 months.
+Clean first encounter.
+
+---
+
+**Case 5 — Invalid**
+Member enrolled January 2022 but the trigger is February 2022 — just one month later.
+Rule 1 fails. The lookback window would need to extend to February 2021 —
+before the dataset starts. We have no history to validate against.
+
+---
+
+**Case 6 — Valid**
+Member enrolled January 2022 with claims in 2022 but a gap in 2023.
+Trigger occurs February 2024.
+Rule 1 passes — enrolled more than 12 months before trigger.
+Rule 2 passes — E11.9 not seen in 2023 (which is the lookback window).
+The gap in claims is noted in the `has_claims_12m_before` flag but does not
+disqualify the trigger. The member simply had no claims that year.
+
+---
+
+**Case 7 — Invalid**
+Member enrolled January 2022 with claims throughout.
+Diabetes (E11.9) appears in August 2022 — shown as a red dot.
+The trigger occurs June 2024.
+Rule 1 passes — enrolled long before the trigger.
+Rule 2 fails — E11.9 was seen in August 2022 which is within the 12 months
+before the June 2024 trigger. This is a recurrence, not a first encounter.
+
+---
+
+**Case 8 — Valid**
+Member enrolled January 2022 with claims in March and September 2022.
+Depression (F32) first appears in January 2023.
+This is the earliest possible valid trigger — January 2023 is exactly
+12 months after the dataset start of January 2022.
+Both rules pass. This is the left edge of the valid trigger window.
+
+---
+
+**Case 9 — Invalid**
+Member enrolled January 2022 but has no prior claims.
+The very first claim is the trigger in January 2022.
+Rule 1 fails — enrolled the same month as the trigger.
+There is no history at all to confirm the diagnosis is new.
+
+---
+
+**Case 10 — Invalid**
+Member enrolled June 2023 with claims in August and November 2023.
+Diabetes (E11.9) first appears January 2024.
+Rule 2 passes — E11.9 not seen in prior claims.
+Rule 1 fails — enrolled June 2023 which is only 7 months before January 2024.
+We need at least 12 months of enrollment. This member would qualify
+if their trigger occurred after June 2024.
+
+---
+
+**Case 11 — Valid**
+Member enrolled January 2022 with consistent claims across all years.
+CKD (N18) first appears October 2025.
+Rule 1 passes easily — over 3 years of enrollment before trigger.
+Rule 2 passes — N18 not seen in the prior 12 months.
+Strong, well-evidenced first encounter.
+
+---
+
+**Case 12 — Valid**
+Member enrolled January 2022 but first claim appears April 2023.
+Back Pain (M54) first appears November 2024.
+Rule 1 passes — enrolled January 2022 which is well before November 2023
+(12 months before trigger).
+Rule 2 passes — M54 not seen in the April to November 2023 lookback window.
+The gap between enrollment and first claim is acceptable — enrollment date
+is what matters for Rule 1, not first claim date.
+
+---
+"""))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -518,41 +636,155 @@ right_cases = [
 display(Markdown("""
 ### Right Boundary — 12 Test Cases
 
-Each timeline shows:
-- **Grey bar** — enrollment period
+**How to read the timelines:**
+- **Grey bar** — full enrollment period from membership records
 - **Grey dotted line** — enrollment end date
-- **Green shaded** — T30 follow-up window
-- **Yellow shaded** — T60 follow-up window
-- **Orange shaded** — T180 follow-up window
+- **Green shaded region** — T30 follow-up window (30 days after trigger)
+- **Yellow shaded region** — T60 follow-up window (60 days after trigger)
+- **Orange shaded region** — T180 follow-up window (180 days after trigger)
+- **Blue dots** — claims in member history
 - **Orange arrow** — trigger date
-- **R1** — dataset window check pass or fail
-- **R2** — enrollment coverage check pass or fail
-- **Verdict** — Valid / Invalid / Partial (Partial = invalid for that window)
+- **R1 ✓/✗** — dataset window check pass or fail
+- **R2 ✓/✗** — enrollment coverage check pass or fail
+- **Verdict** — green Valid, red Invalid, yellow Partial (Partial = invalid for that window)
 """))
 
-fig, axes = plt.subplots(4, 3, figsize=(22, 20))
+fig, axes = plt.subplots(4, 3, figsize=(22, 22))
 axes = axes.flatten()
 
 for i, case in enumerate(right_cases):
     draw_timeline(axes[i], **case)
 
 fig.suptitle("Right Boundary Test Cases — Member Timelines",
-             fontsize=14, fontweight="bold")
-plt.tight_layout()
+             fontsize=14, fontweight="bold", y=1.01)
+plt.tight_layout(rect=[0, 0, 1, 0.99])
 plt.savefig("right_boundary_cases.png", dpi=150, bbox_inches="tight")
 plt.show()
 
+
+display(Markdown("""
+### Right Boundary — Case by Case Explanation
+
+---
+
+**Case 1 — Valid (all windows)**
+Member enrolled January 2022 with trigger in January 2024.
+Dataset end is December 2025 — 24 months of follow-up available.
+Member remains enrolled through December 2025.
+T30, T60, and T180 all fit comfortably within both the dataset and enrollment period.
+
+---
+
+**Case 2 — Valid (all windows)**
+Trigger occurs June 30 2025 — exactly the last date that qualifies for T180.
+Adding 180 days to June 30 lands on December 27 2025 — within the dataset.
+Member enrolled through December 2025. All three windows valid.
+This is the right edge of the T180 eligible window.
+
+---
+
+**Case 3 — Partial (T30 and T60 only)**
+Trigger occurs August 15 2025.
+T30 window ends September 14 2025 — within dataset. Valid.
+T60 window ends October 14 2025 — within dataset. Valid.
+T180 window would end February 11 2026 — beyond December 2025 dataset end. Invalid.
+Member is enrolled but the data does not exist to observe T180 follow-up.
+
+---
+
+**Case 4 — Partial (T30 and T60 only)**
+Trigger October 15 2025.
+T30 valid — ends November 14 2025.
+T60 valid — ends December 14 2025.
+T180 would end April 13 2026 — beyond dataset. Invalid.
+Same pattern as Case 3 but the trigger is later so T60 is also closer to the boundary.
+
+---
+
+**Case 5 — Partial (T30 only)**
+Trigger November 15 2025.
+T30 valid — ends December 15 2025 — just within dataset.
+T60 would end January 14 2026 — beyond dataset. Invalid.
+T180 would end May 14 2026 — beyond dataset. Invalid.
+Only the shortest window is observable.
+
+---
+
+**Case 6 — Invalid (no windows)**
+Trigger December 15 2025 — at the dataset end.
+T30 would end January 14 2026 — beyond dataset.
+No follow-up window is observable at all.
+This trigger is excluded from all analysis.
+
+---
+
+**Case 7 — Partial (T30 only)**
+Trigger January 15 2024. Member disenrolls February 28 2024 — only 45 days later.
+T30 valid — enrollment covers 30 days after trigger.
+T60 invalid — member disenrolls before 60 days are up.
+T180 invalid — member disenrolls well before 180 days.
+After disenrollment there are no observable claims even though the dataset continues.
+
+---
+
+**Case 8 — Valid (all windows)**
+Trigger January 15 2024. Member disenrolls August 31 2024 — 229 days later.
+T30 valid — enrollment covers 30 days.
+T60 valid — enrollment covers 60 days.
+T180 valid — enrollment covers 180 days (July 14 2024 is within August 31 enrollment).
+All windows observable within enrollment period.
+
+---
+
+**Case 9 — Invalid (no windows)**
+Trigger January 15 2024. Member disenrolls January 15 2024 — the same day.
+No follow-up window is observable.
+The enrollment end coincides with the trigger date.
+Excluded from all analysis.
+
+---
+
+**Case 10 — Valid (all windows)**
+Trigger March 15 2025. Member enrolled through December 2025.
+T180 window ends September 11 2025 — well within both dataset and enrollment.
+All three windows valid. Clean trigger with full observable follow-up.
+
+---
+
+**Case 11 — Partial (T30 and T60 only)**
+Trigger July 15 2025. Member enrolled through December 2025.
+T30 valid — ends August 14 2025.
+T60 valid — ends September 13 2025.
+T180 would end January 11 2026 — beyond dataset end. Invalid.
+Same as Case 3 and 4 — late 2025 triggers lose T180 eligibility.
+
+---
+
+**Case 12 — Partial (T30 and T60 only)**
+Trigger June 30 2025. Member disenrolls September 30 2025 — 92 days later.
+T30 valid — enrollment covers 30 days.
+T60 valid — enrollment covers 60 days (August 29 is within September 30 enrollment).
+T180 invalid — member disenrolls September 30 before the 180-day window closes December 27.
+Enrollment ends before T180 is complete even though the dataset continues.
+
+---
+"""))
+
 display(Markdown("""
 ---
-## Chapter 6 Summary
+## Summary — Boundary Rules
 
-Right boundary rules ensure follow-up data completeness.
+**Left boundary ensures:**
+- Member was enrolled long enough to have meaningful claims history
+- The trigger diagnosis is genuinely new — not a recurrence or ongoing condition
 
-Key takeaways:
-- T180 is the most restrictive — triggers must occur before June 2025
-- T30 is the most permissive — triggers can occur through November 2025
-- Member disenrollment can further restrict window eligibility
-- Partial qualification is treated as invalid — no half windows
+**Right boundary ensures:**
+- Enough follow-up data exists in the dataset after the trigger
+- The member remained enrolled long enough to generate observable follow-up claims
+
+**Partial qualification is treated as fully invalid per window.**
+A trigger valid for T30 but not T60 is excluded from T60 analysis entirely.
+This maintains clean, unambiguous population definitions per time window.
 
 The quantitative impact of these rules on the total trigger population
 is documented in NB 03 — Boundary Impact.
