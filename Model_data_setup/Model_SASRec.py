@@ -103,13 +103,18 @@ WINDOWS       = ["T0_30", "T30_60", "T60_180"]
 PAD_IDX       = 0
 NUM_WORKERS   = min(4 * max(NUM_GPUS, 1), 16)
 
+from datetime import datetime, timezone
+RUN_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+
 DS            = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
 CACHE_DIR     = f"./cache_sasrec_{SAMPLE}"
-CHECKPOINT    = f"./checkpoints/sasrec_{SAMPLE}_best.pt"
+MODEL_DIR     = "/home/jupyter/models"
+CHECKPOINT    = f"{MODEL_DIR}/sasrec_{SAMPLE}_{RUN_TIMESTAMP}.pt"
+VOCAB_PATH    = f"{MODEL_DIR}/sasrec_{SAMPLE}_{RUN_TIMESTAMP}_vocab.pkl"
 LOAD_CACHE    = False
 
 os.makedirs(CACHE_DIR, exist_ok=True)
-os.makedirs("./checkpoints", exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 
 # DataLoader kwargs — prefetch_factor only valid when num_workers > 0
 _loader_kwargs = dict(pin_memory=(DEVICE == "cuda"), num_workers=NUM_WORKERS)
@@ -118,11 +123,10 @@ if NUM_WORKERS > 0:
 
 client = bigquery.Client(project="anbc-hcb-dev")
 
-# Single timestamp for this entire run — fixed at start, used in all metric rows
-from datetime import datetime, timezone
-RUN_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 print(f"Config done — sample={SAMPLE}, device={DEVICE}, num_workers={NUM_WORKERS}")
-print(f"Run timestamp: {RUN_TIMESTAMP}")
+print(f"Run timestamp : {RUN_TIMESTAMP}")
+print(f"Checkpoint    : {CHECKPOINT}")
+print(f"Vocab path    : {VOCAB_PATH}")
 
 display(Markdown(f"""
 ## Config
@@ -582,7 +586,7 @@ def evaluate(loader, mdl):
     counts = defaultdict(int)
     val_loss_sum   = 0.0
     val_loss_count = 0
-    bce_val = nn.BCEWithLogitsLoss()
+    _bce = nn.BCEWithLogitsLoss()
 
     with torch.no_grad():
         for batch in loader:
@@ -602,13 +606,13 @@ def evaluate(loader, mdl):
             batch_loss = torch.tensor(0.0, device=DEVICE)
             n_windows  = 0
             if m30.sum()  > 0:
-                batch_loss = batch_loss + bce_val(p30[m30].float(),  l30[m30].float())
+                batch_loss = batch_loss + _bce(p30[m30].float(),  l30[m30].float())
                 n_windows += 1
             if m60.sum()  > 0:
-                batch_loss = batch_loss + bce_val(p60[m60].float(),  l60[m60].float())
+                batch_loss = batch_loss + _bce(p60[m60].float(),  l60[m60].float())
                 n_windows += 1
             if m180.sum() > 0:
-                batch_loss = batch_loss + bce_val(p180[m180].float(), l180[m180].float())
+                batch_loss = batch_loss + _bce(p180[m180].float(), l180[m180].float())
                 n_windows += 1
             if n_windows > 0:
                 val_loss_sum   += (batch_loss / n_windows).item()
@@ -737,23 +741,55 @@ for epoch in range(EPOCHS):
 
     if val_ndcg > best_ndcg:
         best_ndcg, no_improve = val_ndcg, 0
+
         torch.save({
             "epoch":           epoch,
             "model_state":     get_raw(model).state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "scheduler_state": scheduler.state_dict(),
-            "specialty_vocab": specialty_vocab,
             "best_val_ndcg":   best_ndcg,
+            "specialty_vocab": specialty_vocab,
+            "idx_to_specialty": {v - 1: k for k, v in specialty_vocab.items()
+                                  if isinstance(v, int) and v > 0},
             "config": {
-                "num_specialties": NUM_SPECIALTIES,
-                "embedding_dim":   EMBEDDING_DIM,
-                "max_seq_len":     MAX_SEQ_LEN,
-                "num_heads":       NUM_HEADS,
-                "num_blocks":      NUM_BLOCKS,
-                "dropout":         DROPOUT,
-            }
+                "model":            "SASRec",
+                "sample":           SAMPLE,
+                "run_timestamp":    RUN_TIMESTAMP,
+                "num_specialties":  NUM_SPECIALTIES,
+                "embedding_dim":    EMBEDDING_DIM,
+                "max_seq_len":      MAX_SEQ_LEN,
+                "num_heads":        NUM_HEADS,
+                "num_blocks":       NUM_BLOCKS,
+                "dropout":          DROPOUT,
+                "pad_idx":          PAD_IDX,
+            },
+            "preprocessing": {
+                "lookback_days":    365,
+                "seq_ordering":     "visit_date DESC",
+                "padding":          "left",
+                "date_format":      "YYYY-MM-DD",
+                "train_cutoff":     "2024-01-01",
+            },
+            "output_heads": {
+                "head_t30":  "T0_30  — days 1-30 after trigger",
+                "head_t60":  "T30_60 — days 31-60 after trigger",
+                "head_t180": "T60_180 — days 61-180 after trigger",
+            },
         }, CHECKPOINT)
-        print(f"  Checkpoint saved — best NDCG: {best_ndcg:.4f}")
+
+        # Save vocab separately — lightweight file for inference
+        with open(VOCAB_PATH, "wb") as f:
+            pickle.dump({
+                "specialty_vocab":  specialty_vocab,
+                "idx_to_specialty": {v - 1: k for k, v in specialty_vocab.items()
+                                     if isinstance(v, int) and v > 0},
+                "pad_idx":          PAD_IDX,
+                "num_specialties":  NUM_SPECIALTIES,
+            }, f)
+
+        print(f"  Checkpoint : {CHECKPOINT}")
+        print(f"  Vocab      : {VOCAB_PATH}")
+        print(f"  Best NDCG  : {best_ndcg:.4f}")
         display(Markdown(f"Checkpoint saved — NDCG: {best_ndcg:.4f}"))
     else:
         no_improve += 1
