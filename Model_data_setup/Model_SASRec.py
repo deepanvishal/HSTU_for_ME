@@ -117,7 +117,12 @@ if NUM_WORKERS > 0:
     _loader_kwargs.update(prefetch_factor=2, persistent_workers=True)
 
 client = bigquery.Client(project="anbc-hcb-dev")
+
+# Single timestamp for this entire run — fixed at start, used in all metric rows
+from datetime import datetime, timezone
+RUN_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 print(f"Config done — sample={SAMPLE}, device={DEVICE}, num_workers={NUM_WORKERS}")
+print(f"Run timestamp: {RUN_TIMESTAMP}")
 
 display(Markdown(f"""
 ## Config
@@ -155,50 +160,20 @@ if LOAD_CACHE and os.path.exists(SEQ_CACHE) and os.path.exists(VOCAB_CACHE):
         specialty_vocab = pickle.load(f)
     print(f"Cache loaded — {len(seq_df):,} rows")
 else:
-    print("Querying BigQuery for train sequences...")
+    print("Reading train sequences from pre-built BQ table...")
     seq_df = client.query(f"""
-        WITH triggers AS (
-            SELECT DISTINCT
-                t.member_id
-                ,t.trigger_date
-                ,t.trigger_dx
-                ,t.member_segment
-                ,t.is_t30_qualified
-                ,t.is_t60_qualified
-                ,t.is_t180_qualified
-            FROM `{DS}.A870800_gen_rec_triggers_qualified` t
-            INNER JOIN `{DS}.A870800_gen_rec_sample_members_{SAMPLE}` s
-                ON t.member_id = s.member_id
-            WHERE t.is_left_qualified = TRUE
-              AND t.trigger_date < DATE '2024-01-01'
-              AND t.has_claims_12m_before = TRUE
-        ),
-        ranked AS (
-            SELECT
-                t.member_id
-                ,CAST(t.trigger_date AS STRING)              AS trigger_date
-                ,t.trigger_dx
-                ,t.member_segment
-                ,t.is_t30_qualified
-                ,t.is_t60_qualified
-                ,t.is_t180_qualified
-                ,v.specialty_ctg_cd                          AS specialty
-                ,ROW_NUMBER() OVER (
-                    PARTITION BY t.member_id, t.trigger_date, t.trigger_dx
-                    ORDER BY v.visit_date DESC
-                )                                            AS recency_rank
-            FROM triggers t
-            JOIN `{DS}.A870800_gen_rec_visits` v
-                ON t.member_id = v.member_id
-                AND v.visit_date < t.trigger_date
-                AND v.visit_date >= DATE_SUB(t.trigger_date, INTERVAL 365 DAY)
-            WHERE v.specialty_ctg_cd IS NOT NULL
-              AND v.specialty_ctg_cd != ''
-        )
-        SELECT *
-        FROM ranked
-        WHERE recency_rank <= {MAX_SEQ_LEN}
-        ORDER BY member_id, trigger_date, trigger_dx, recency_rank DESC
+        SELECT
+            member_id
+            ,CAST(trigger_date AS STRING)                AS trigger_date
+            ,trigger_dx
+            ,member_segment
+            ,is_t30_qualified
+            ,is_t60_qualified
+            ,is_t180_qualified
+            ,specialty_ctg_cd                            AS specialty
+            ,recency_rank
+        FROM `{DS}.A870800_gen_rec_train_sequences_{SAMPLE}`
+        ORDER BY member_id, trigger_date, trigger_dx, recency_rank
     """).to_dataframe()
     print(f"BQ returned {len(seq_df):,} sequence rows")
     qa_df(seq_df, "seq_df — raw from BQ",
@@ -524,9 +499,9 @@ class SASRec(nn.Module):
         seq_repr = x.gather(1, idx).squeeze(1)
 
         return (
-            torch.sigmoid(self.head_t30(seq_repr)),
-            torch.sigmoid(self.head_t60(seq_repr)),
-            torch.sigmoid(self.head_t180(seq_repr))
+            self.head_t30(seq_repr),
+            self.head_t60(seq_repr),
+            self.head_t180(seq_repr)
         )
 
 
@@ -538,7 +513,8 @@ def get_raw(m):
     return m
 
 
-# Build model — compile inner module first, then wrap DataParallel
+# Build model — DataParallel only, no torch.compile
+# compile can be added back once training is verified working
 base_model = SASRec(
     num_specialties=NUM_SPECIALTIES,
     embedding_dim=EMBEDDING_DIM,
@@ -549,15 +525,16 @@ base_model = SASRec(
     num_classes=NUM_SPECIALTIES
 ).to(DEVICE)
 
-if hasattr(torch, "compile"):
-    print("Compiling inner model with torch.compile...")
-    base_model = torch.compile(base_model)
-
 if NUM_GPUS > 1:
     print(f"Wrapping in DataParallel — {NUM_GPUS} GPUs")
     model = nn.DataParallel(base_model)
 else:
     model = base_model
+
+# Verify model attributes are accessible
+print(f"Model attribute check: emb_drop={hasattr(get_raw(model), 'emb_drop')} | "
+      f"item_emb={hasattr(get_raw(model), 'item_emb')} | "
+      f"blocks={hasattr(get_raw(model), 'blocks')}")
 
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Section 4 done — {n_params:,} parameters, time={time.time()-t0:.1f}s")
@@ -601,9 +578,11 @@ def metrics_at_k(pred, label, k):
 def evaluate(loader, mdl):
     raw = get_raw(mdl)
     raw.eval()
-    # Use same key for sums and counts — no fragile string parsing
     sums   = defaultdict(float)
     counts = defaultdict(int)
+    val_loss_sum   = 0.0
+    val_loss_count = 0
+    bce_val = nn.BCEWithLogitsLoss()
 
     with torch.no_grad():
         for batch in loader:
@@ -618,6 +597,22 @@ def evaluate(loader, mdl):
 
             with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
                 p30, p60, p180 = raw(seq, lens)
+
+            # Val loss — same windows as train loss
+            batch_loss = torch.tensor(0.0, device=DEVICE)
+            n_windows  = 0
+            if m30.sum()  > 0:
+                batch_loss = batch_loss + bce_val(p30[m30].float(),  l30[m30].float())
+                n_windows += 1
+            if m60.sum()  > 0:
+                batch_loss = batch_loss + bce_val(p60[m60].float(),  l60[m60].float())
+                n_windows += 1
+            if m180.sum() > 0:
+                batch_loss = batch_loss + bce_val(p180[m180].float(), l180[m180].float())
+                n_windows += 1
+            if n_windows > 0:
+                val_loss_sum   += (batch_loss / n_windows).item()
+                val_loss_count += 1
 
             for k in K_VALUES:
                 for tag, pred, lbl, mask in [
@@ -635,7 +630,6 @@ def evaluate(loader, mdl):
                     sums[f"{tag}_ndcg@{k}"] += ndcg.item() * n
                     counts[f"{tag}@{k}"]    += n
 
-    # Average — clean loop, no None tuple trick
     result = {}
     for tag in WINDOWS:
         for k in K_VALUES:
@@ -643,6 +637,8 @@ def evaluate(loader, mdl):
             for metric in ["hit", "prec", "rec", "ndcg"]:
                 key = f"{tag}_{metric}@{k}"
                 result[key] = sums[key] / n if n > 0 else 0.0
+
+    result["val_loss"] = val_loss_sum / max(val_loss_count, 1)
     return result
 
 
@@ -675,7 +671,7 @@ print(f"Section 6 starting — training for {EPOCHS} epochs, {len(train_loader)}
 optimizer  = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 scheduler  = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 scaler     = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
-bce        = nn.BCELoss()
+bce        = nn.BCEWithLogitsLoss()
 best_ndcg  = 0.0
 no_improve = 0
 
@@ -723,15 +719,20 @@ for epoch in range(EPOCHS):
     print(f"  Epoch {epoch+1} training done — avg loss: {avg_loss:.4f} | Running eval...")
 
     val_m     = evaluate(val_loader, model)
+    val_loss  = val_m.get("val_loss", 0)
     val_ndcg  = np.mean([val_m.get(f"T0_30_ndcg@{k}", 0) for k in K_VALUES])
     ep_time   = time.time() - t_ep
 
     display(Markdown(
-        f"**Epoch {epoch+1}/{EPOCHS}** — Loss: {avg_loss:.4f} | "
-        f"Val NDCG@T0_30 avg: {val_ndcg:.4f} | "
+        f"**Epoch {epoch+1}/{EPOCHS}** — "
+        f"Train Loss: {avg_loss:.4f} | "
+        f"Val Loss: {val_loss:.4f} | "
+        f"Val NDCG@T0_30: {val_ndcg:.4f} | "
         f"LR: {scheduler.get_last_lr()[0]:.2e} | "
         f"Time: {ep_time:.1f}s"
     ))
+    print(f"  Epoch {epoch+1} — Train Loss: {avg_loss:.4f} | Val Loss: {val_loss:.4f} | "
+          f"Val NDCG: {val_ndcg:.4f}")
     print_metrics(val_m, f"Val Epoch {epoch+1}")
 
     if val_ndcg > best_ndcg:
@@ -781,46 +782,20 @@ t_model = SASRec(**cfg, num_classes=cfg["num_specialties"]).to(DEVICE)
 t_model.load_state_dict(ckpt["model_state"])
 print(f"Checkpoint loaded — epoch {ckpt['epoch']+1}, best NDCG: {ckpt['best_val_ndcg']:.4f}")
 
-print("Pulling test sequences from BQ...")
+print("Reading test sequences from pre-built BQ table...")
 test_seq_df = client.query(f"""
-    WITH triggers AS (
-        SELECT DISTINCT
-            member_id
-            ,trigger_date
-            ,trigger_dx
-            ,member_segment
-            ,is_t30_qualified
-            ,is_t60_qualified
-            ,is_t180_qualified
-        FROM `{DS}.A870800_gen_rec_model_test_{SAMPLE}`
-        WHERE label_specialty IS NOT NULL
-    ),
-    ranked AS (
-        SELECT
-            t.member_id
-            ,CAST(t.trigger_date AS STRING)              AS trigger_date
-            ,t.trigger_dx
-            ,t.member_segment
-            ,t.is_t30_qualified
-            ,t.is_t60_qualified
-            ,t.is_t180_qualified
-            ,v.specialty_ctg_cd                          AS specialty
-            ,ROW_NUMBER() OVER (
-                PARTITION BY t.member_id, t.trigger_date, t.trigger_dx
-                ORDER BY v.visit_date DESC
-            )                                            AS recency_rank
-        FROM triggers t
-        JOIN `{DS}.A870800_gen_rec_visits` v
-            ON t.member_id = v.member_id
-            AND v.visit_date < t.trigger_date
-            AND v.visit_date >= DATE_SUB(t.trigger_date, INTERVAL 365 DAY)
-        WHERE v.specialty_ctg_cd IS NOT NULL
-          AND v.specialty_ctg_cd != ''
-    )
-    SELECT *
-    FROM ranked
-    WHERE recency_rank <= {MAX_SEQ_LEN}
-    ORDER BY member_id, trigger_date, trigger_dx, recency_rank DESC
+    SELECT
+        member_id
+        ,CAST(trigger_date AS STRING)                    AS trigger_date
+        ,trigger_dx
+        ,member_segment
+        ,is_t30_qualified
+        ,is_t60_qualified
+        ,is_t180_qualified
+        ,specialty_ctg_cd                                AS specialty
+        ,recency_rank
+    FROM `{DS}.A870800_gen_rec_test_sequences_{SAMPLE}`
+    ORDER BY member_id, trigger_date, trigger_dx, recency_rank
 """).to_dataframe()
 test_seq_df["trigger_date"]  = test_seq_df["trigger_date"].astype(str).str[:10]
 test_seq_df["specialty_id"]  = test_seq_df["specialty"].map(specialty_vocab).fillna(PAD_IDX).astype(int)
@@ -883,6 +858,7 @@ rows = [
     {
         "model":          "SASRec",
         "sample":         SAMPLE,
+        "run_timestamp":  RUN_TIMESTAMP,
         "time_bucket":    w,
         "k":              k,
         "member_segment": "ALL",
@@ -904,6 +880,7 @@ client.load_table_from_dataframe(
         schema=[
             bigquery.SchemaField("model",          "STRING"),
             bigquery.SchemaField("sample",         "STRING"),
+            bigquery.SchemaField("run_timestamp",  "STRING"),
             bigquery.SchemaField("time_bucket",    "STRING"),
             bigquery.SchemaField("k",              "INT64"),
             bigquery.SchemaField("member_segment", "STRING"),
@@ -921,72 +898,99 @@ display(Markdown(f"Written to `A870800_gen_rec_model_metrics` | **Time:** {time.
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — VISUALIZATION vs MARKOV BASELINE
-# Markov comparison reads from markov_metrics_{SAMPLE} — apples to apples
+# SECTION 9 — VISUALIZATION — SASREC RESULTS
+# Reads latest run from BQ using run_timestamp
+# No comparison — standalone SASRec charts only
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
-display(Markdown("---\n## Section 9 — SASRec vs Markov Baseline"))
-print("Section 9 — loading Markov metrics and plotting...")
+display(Markdown("---\n## Section 9 — SASRec Results"))
+print("Section 9 — loading latest run metrics from BQ...")
 
-markov_df = client.query(f"""
-    SELECT time_bucket, k, hit_at_k, precision_at_k, recall_at_k, ndcg_at_k
-    FROM `{DS}.A870800_gen_rec_markov_metrics_{SAMPLE}`
-    WHERE member_segment = 'ALL'
+# Load latest run — filter by the timestamp set at start of this run
+plot_df = client.query(f"""
+    SELECT time_bucket, k, member_segment
+        ,hit_at_k, precision_at_k, recall_at_k, ndcg_at_k
+    FROM `{DS}.A870800_gen_rec_model_metrics`
+    WHERE model = 'SASRec'
+      AND sample = '{SAMPLE}'
+      AND run_timestamp = '{RUN_TIMESTAMP}'
+      AND member_segment = 'ALL'
+    ORDER BY time_bucket, k
 """).to_dataframe()
-print(f"Markov metrics loaded — {len(markov_df)} rows")
 
-METRICS  = ["hit_at_k", "precision_at_k", "recall_at_k", "ndcg_at_k"]
-MLABELS  = {"hit_at_k": "Hit@K", "precision_at_k": "Precision@K",
-            "recall_at_k": "Recall@K", "ndcg_at_k": "NDCG@K"}
-WCOLORS  = {"T0_30": "#5DBE7E", "T30_60": "#F7C948", "T60_180": "#F4845F"}
-WMARKERS = {"T0_30": "o", "T30_60": "s", "T60_180": "^"}
+print(f"Loaded {len(plot_df)} metric rows for run {RUN_TIMESTAMP}")
 
-fig, axes = plt.subplots(2, 2, figsize=(20, 14))
-axes = axes.flatten()
+if plot_df.empty:
+    print("WARNING: No metrics found for this run timestamp — check Section 8 wrote correctly")
+else:
+    METRICS  = ["hit_at_k", "precision_at_k", "recall_at_k", "ndcg_at_k"]
+    MLABELS  = {"hit_at_k": "Hit@K", "precision_at_k": "Precision@K",
+                "recall_at_k": "Recall@K", "ndcg_at_k": "NDCG@K"}
+    WCOLORS  = {"T0_30": "#5DBE7E", "T30_60": "#F7C948", "T60_180": "#F4845F"}
+    WMARKERS = {"T0_30": "o", "T30_60": "s", "T60_180": "^"}
 
-for i, metric in enumerate(METRICS):
-    ax = axes[i]
-    for window in WINDOWS:
-        m_sub = markov_df[markov_df["time_bucket"] == window].sort_values("k")
-        s_sub = metrics_df[metrics_df["time_bucket"] == window].sort_values("k")
-        if not m_sub.empty:
-            ax.plot(m_sub["k"], m_sub[metric], color=WCOLORS[window],
-                    marker=WMARKERS[window], linewidth=2, linestyle="--",
-                    alpha=0.7, label=f"Markov {window}")
-        if not s_sub.empty:
-            ax.plot(s_sub["k"], s_sub[metric], color=WCOLORS[window],
-                    marker=WMARKERS[window], linewidth=2.5, linestyle="-",
-                    label=f"SASRec {window}")
-    ax.set_title(MLABELS[metric], fontsize=11, fontweight="bold")
-    ax.set_xlabel("K"); ax.set_ylabel(MLABELS[metric])
-    ax.set_xticks(K_VALUES); ax.legend(fontsize=7, ncol=2)
-    ax.grid(True, linestyle="--", alpha=0.4); ax.set_ylim(0, 1.05)
+    # Chart 1 — all four metrics by K and window
+    fig, axes = plt.subplots(2, 2, figsize=(20, 14))
+    axes = axes.flatten()
 
-fig.suptitle(f"SASRec vs Markov — {SAMPLE} (dashed=Markov, solid=SASRec)",
-             fontsize=13, fontweight="bold", y=1.01)
-plt.tight_layout()
-plt.savefig(f"sasrec_vs_markov_{SAMPLE}.png", dpi=150, bbox_inches="tight")
-plt.show()
+    for i, metric in enumerate(METRICS):
+        ax = axes[i]
+        for window in WINDOWS:
+            sub = plot_df[plot_df["time_bucket"] == window].sort_values("k")
+            if sub.empty:
+                continue
+            ax.plot(sub["k"], sub[metric],
+                    color=WCOLORS[window], marker=WMARKERS[window],
+                    linewidth=2, markersize=8, label=window)
+            for _, row in sub.iterrows():
+                ax.annotate(f"{row[metric]:.3f}", (row["k"], row[metric]),
+                            textcoords="offset points", xytext=(5, 4),
+                            fontsize=8, color=WCOLORS[window])
+        ax.set_title(MLABELS[metric], fontsize=11, fontweight="bold")
+        ax.set_xlabel("K")
+        ax.set_ylabel(MLABELS[metric])
+        ax.set_xticks(K_VALUES)
+        ax.legend(fontsize=9)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.set_ylim(0, 1.05)
 
-# K=3 comparison table
-print("\nK=3 Summary:")
-summary = []
-for w in WINDOWS:
-    for model_name, src, k_col in [("Markov", markov_df, "k"), ("SASRec", metrics_df, "k")]:
-        sub = src[(src["time_bucket"] == w) & (src[k_col] == 3)]
-        if sub.empty:
-            continue
-        row = {
-            "Model": model_name, "Window": w,
-            "Hit@3":    f"{sub['hit_at_k'].values[0]:.4f}",
-            "Prec@3":   f"{sub['precision_at_k'].values[0]:.4f}",
-            "Recall@3": f"{sub['recall_at_k'].values[0]:.4f}",
-            "NDCG@3":   f"{sub['ndcg_at_k'].values[0]:.4f}",
-        }
-        summary.append(row)
-        print(f"  {model_name} {w}: Hit={row['Hit@3']} Prec={row['Prec@3']} Rec={row['Recall@3']} NDCG={row['NDCG@3']}")
+    fig.suptitle(f"SASRec — {SAMPLE} Sample | Run: {RUN_TIMESTAMP}",
+                 fontsize=13, fontweight="bold", y=1.01)
+    plt.tight_layout()
+    plt.savefig(f"sasrec_metrics_{SAMPLE}.png", dpi=150, bbox_inches="tight")
+    plt.show()
 
-display(pd.DataFrame(summary).reset_index(drop=True))
+    # Chart 2 — NDCG heatmap window vs K
+    fig, ax = plt.subplots(figsize=(10, 5))
+    pivot = plot_df.pivot_table(
+        index="time_bucket", columns="k",
+        values="ndcg_at_k", aggfunc="mean"
+    ).reindex(WINDOWS)
+    sns.heatmap(pivot, ax=ax, cmap="YlGn", annot=True, fmt=".3f",
+                annot_kws={"size": 12}, linewidths=0.5,
+                cbar_kws={"label": "NDCG@K"})
+    ax.set_title(f"SASRec NDCG — {SAMPLE} | Run: {RUN_TIMESTAMP}",
+                 fontsize=11, fontweight="bold")
+    ax.set_xlabel("K")
+    ax.set_ylabel("Time Window")
+    plt.tight_layout()
+    plt.savefig(f"sasrec_ndcg_{SAMPLE}.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+    # K=3 summary table
+    display(Markdown("### K=3 Summary"))
+    k3 = plot_df[plot_df["k"] == 3][[
+        "time_bucket", "hit_at_k", "precision_at_k", "recall_at_k", "ndcg_at_k"
+    ]].rename(columns={
+        "time_bucket":    "Window",
+        "hit_at_k":       "Hit@3",
+        "precision_at_k": "Prec@3",
+        "recall_at_k":    "Recall@3",
+        "ndcg_at_k":      "NDCG@3"
+    }).reset_index(drop=True)
+    display(k3)
+    print(k3.to_string(index=False))
+
 print(f"Section 9 done — time={time.time()-t0:.1f}s")
 display(Markdown(f"**Section 9:** {time.time()-t0:.1f}s"))
 print("NB_08 complete")
