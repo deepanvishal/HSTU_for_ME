@@ -11,6 +11,13 @@
 --           A870800_gen_rec_sample_members_10pct
 -- ============================================================
 
+SELECT
+    COUNT(*)                                             AS total_members
+    ,CAST(COUNT(*) * 0.001 AS INT64)                     AS topup_1pct
+    ,CAST(COUNT(*) * 0.005 AS INT64)                     AS topup_5pct
+    ,CAST(COUNT(*) * 0.010 AS INT64)                     AS topup_10pct
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_population_stats`
+WHERE t180_triggers > 0;
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- SECTION 0 — POPULATION STATISTICS (reference for QA)
