@@ -187,6 +187,31 @@ per_trigger_k AS (
     CROSS JOIN UNNEST([1, 3, 5]) AS k_val
     WHERE predicted_specialties IS NOT NULL
 ),
+-- replace with_metrics CTE with this:
+per_trigger_with_ndcg AS (
+    SELECT
+        p.*
+        ,(
+            SELECT
+                ROUND(
+                    SUM(
+                        CASE WHEN pred IN UNNEST(p.true_label_set)
+                             THEN 1.0 / LOG(pos + 2) / LOG(2)
+                             ELSE 0.0
+                        END
+                    ) /
+                    NULLIF((
+                        SELECT SUM(1.0 / LOG(ideal_pos + 2) / LOG(2))
+                        FROM UNNEST(
+                            GENERATE_ARRAY(0, LEAST(p.true_label_count, p.k_val) - 1)
+                        ) AS ideal_pos
+                    ), 0),
+                6)
+            FROM UNNEST(p.predicted_specialties) AS pred WITH OFFSET pos
+            WHERE pos < p.k_val
+        )                                                AS ndcg_at_k
+    FROM per_trigger_k p
+),
 with_metrics AS (
     SELECT
         member_id
@@ -198,42 +223,11 @@ with_metrics AS (
         ,true_label_count
         ,prediction_count
         ,hits_at_k
-
-        -- Hit@K — 1 if any hit in top K
         ,CASE WHEN hits_at_k > 0 THEN 1.0 ELSE 0.0 END  AS hit_at_k
-
-        -- Precision@K — hits / K
         ,ROUND(hits_at_k / k_val, 6)                     AS precision_at_k
-
-        -- Recall@K — hits / true label count
-        ,ROUND(hits_at_k /
-            NULLIF(true_label_count, 0), 6)              AS recall_at_k
-
-        -- NDCG@K — position-weighted score
-        ,(
-            SELECT
-                ROUND(
-                    SUM(
-                        CASE WHEN pred IN UNNEST(true_label_set)
-                             THEN 1.0 / LOG(pos + 2) / LOG(2)
-                             ELSE 0.0
-                        END
-                    ) /
-                    NULLIF(
-                        -- Ideal DCG — top min(|true|, K) positions all correct
-                        (
-                            SELECT SUM(1.0 / LOG(ideal_pos + 2) / LOG(2))
-                            FROM UNNEST(
-                                GENERATE_ARRAY(0, LEAST(true_label_count, k_val) - 1)
-                            ) AS ideal_pos
-                        ),
-                    0),
-                6)
-            FROM UNNEST(predicted_specialties) AS pred WITH OFFSET pos
-            WHERE pos < k_val
-        )                                                AS ndcg_at_k
-
-    FROM per_trigger_k
+        ,ROUND(hits_at_k / NULLIF(true_label_count, 0), 6) AS recall_at_k
+        ,ndcg_at_k
+    FROM per_trigger_with_ndcg
 )
 -- Final aggregation — average metrics per window + K + segment
 SELECT
