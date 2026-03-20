@@ -53,7 +53,7 @@ def qa_df(df, label, sample_n=3, check_cols=None):
 
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-SAMPLE      = "1pct"
+SAMPLE      = "5pct"
 MAX_SEQ_LEN = 20
 PAD_IDX     = 0
 
