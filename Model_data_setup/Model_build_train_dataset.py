@@ -58,12 +58,12 @@ def qa_df(df, label, sample_n=3, check_cols=None):
 
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-SAMPLE      = "1pct"
+SAMPLE      = "5pct"
 MAX_SEQ_LEN = 20
 PAD_IDX     = 0
 
 DS          = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
-CACHE_DIR   = f"./cache_model_data_{SAMPLE}"
+CACHE_DIR   = f"./cache_train_data_{SAMPLE}"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 client = bigquery.Client(project="anbc-hcb-dev")
