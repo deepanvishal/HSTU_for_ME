@@ -220,20 +220,24 @@ for window in WINDOWS:
         # fillna(0) — NaN in pivot breaks matplotlib imshow with dtype object error
         pivot_float = pivot.astype(float).fillna(0)
 
-        fig, ax = plt.subplots(figsize=(11, 8))
+        # Height scales with row count — prevents y label overlap
+        fig_h = max(8, len(top15_sp) * 0.55)
+        fig, ax = plt.subplots(figsize=(13, fig_h))
         sns.heatmap(pivot_float, ax=ax,
                     annot=annot_arr, fmt="", cmap="YlGn",
-                    linewidths=0.5, annot_kws={"size": 8},
+                    linewidths=0.5, annot_kws={"size": 9},
                     vmin=0, vmax=1, cbar_kws={"label": f"Hit Rate @{k}"})
 
         ylabels = [f"{sp}  (n={int(vol_ref.get(sp, 0)):,})" for sp in top15_sp]
-        ax.set_yticklabels(ylabels, fontsize=8)
+        # rotation=0 keeps labels horizontal; ha="right" aligns to cell edge
+        ax.set_yticklabels(ylabels, fontsize=9, rotation=0, ha="right", va="center")
         ax.set_title(f"Hit Rate @{k} — Top 15 Specialties by Volume\n"
                      f"{WLABELS[window]}  |  cell = rate (correctly predicted count)",
                      fontsize=11, fontweight="bold")
         ax.set_xlabel("")
         ax.set_ylabel("")
-        plt.tight_layout()
+        # Extra left margin for long specialty names
+        plt.subplots_adjust(left=0.35)
         plt.savefig(f"analysis_03_heatmap_k{k}_{window}.png", dpi=150, bbox_inches="tight")
         plt.show()
 
