@@ -1,8 +1,8 @@
 # ============================================================
 # NB_Analysis_05_window_comparison.py
 # Purpose : Compare all 3 models across time windows at K=5
-#           Metrics: Hit@5, NDCG@5, Precision@5, Recall@5
-# Source  : A870800_gen_rec_analysis_perf_overall
+#           Hit@5, NDCG@5, Precision@5, Recall@5
+# Source  : A870800_gen_rec_analysis_perf_full
 # ============================================================
 import time
 import pandas as pd
@@ -30,36 +30,38 @@ METRICS = [
 
 display(Markdown("""
 # Time Window Comparison — All Models at K=5
-All 4 metrics: Hit@5, NDCG@5, Precision@5, Recall@5.
+Hit@5, NDCG@5, Precision@5, Recall@5 across T0-30, T30-60, T60-180.
 
 **Note:** Markov predictions are window-agnostic — same top-5 applied across all windows.
 Performance degradation at T30-60 and T60-180 reflects absence of temporal modeling.
 """))
 
+t0 = time.time()
 df = client.query(f"""
     SELECT model, time_bucket, n_triggers
-        ,hit_at_5, ndcg_at_5
-        ,precision_at_5, recall_at_5
-    FROM `{DS}.A870800_gen_rec_analysis_perf_overall`
+        ,hit_at_5, ndcg_at_5, precision_at_5, recall_at_5
+    FROM `{DS}.A870800_gen_rec_analysis_perf_full`
     WHERE member_segment = 'ALL'
     ORDER BY model, time_bucket
 """).to_dataframe()
 
 df["time_bucket"] = pd.Categorical(df["time_bucket"], WINDOWS, ordered=True)
 df = df.sort_values(["model", "time_bucket"])
-models_here = [m for m in MODELS if m in df["model"].unique()]
+models_here  = [m for m in MODELS if m in df["model"].unique()]
 wlabels_list = [WLABELS[w] for w in WINDOWS]
+
+print(f"Loaded {len(df):,} rows — {time.time()-t0:.1f}s")
 
 
 # ════════════════════════════════════════════════════════════
-# CHART 1 — Line plots: all 4 metrics × all 3 windows
+# CHART 1 — 2x2 Line plots: all 4 metrics across windows
 # ════════════════════════════════════════════════════════════
 fig, axes = plt.subplots(2, 2, figsize=(18, 12))
 axes = axes.flatten()
 
 for ax, (col, label) in zip(axes, METRICS):
     for model in models_here:
-        sub = df[df["model"] == model].set_index("time_bucket").reindex(WINDOWS)
+        sub  = df[df["model"] == model].set_index("time_bucket").reindex(WINDOWS)
         vals = sub[col].fillna(0).values
         ax.plot(wlabels_list, vals,
                 marker=MMARKERS.get(model, "o"), linewidth=2.5, markersize=9,
@@ -68,23 +70,22 @@ for ax, (col, label) in zip(axes, METRICS):
             ax.annotate(f"{v:.3f}",
                         xy=(WLABELS[w], v),
                         textcoords="offset points", xytext=(0, 10),
-                        ha="center", fontsize=8,
+                        ha="center", fontsize=8.5,
                         color=MCOLORS.get(model, "#999"))
+
     ax.set_title(f"{label} Across Time Windows", fontsize=12, fontweight="bold")
     ax.set_ylabel(label)
     ax.set_ylim(0, 1.1)
     ax.legend(fontsize=10)
     ax.grid(linestyle="--", alpha=0.4)
 
-# Add n_triggers as shared footnote on the figure
-n_row = (df[(df["model"] == models_here[0])]
-         .set_index("time_bucket")
-         .reindex(WINDOWS)["n_triggers"]
-         .fillna(0))
-footnote = "  |  ".join([f"{WLABELS[w]}: n={int(n):,}" for w, n in zip(WINDOWS, n_row)])
+# Trigger counts as shared footnote
+n_ref = (df[df["model"] == models_here[0]]
+         .set_index("time_bucket").reindex(WINDOWS)["n_triggers"].fillna(0))
+footnote = "  |  ".join([f"{WLABELS[w]}: n={int(n):,}"
+                          for w, n in zip(WINDOWS, n_ref)])
 fig.text(0.5, -0.01, f"Trigger counts — {footnote}",
          ha="center", fontsize=9, color="#555555")
-
 fig.suptitle("Model Comparison — All Metrics at K=5",
              fontsize=14, fontweight="bold", y=1.01)
 plt.tight_layout()
@@ -93,27 +94,24 @@ plt.show()
 
 
 # ════════════════════════════════════════════════════════════
-# CHART 2 — Heatmaps: one per metric, model × window
+# CHART 2 — 2x2 Heatmaps: model × window, one per metric
 # ════════════════════════════════════════════════════════════
 fig, axes = plt.subplots(2, 2, figsize=(18, 10))
 axes = axes.flatten()
 
+n_vals = (df[df["model"] == models_here[0]]
+          .set_index("time_bucket").reindex(WINDOWS)["n_triggers"].fillna(0))
+
 for ax, (col, label) in zip(axes, METRICS):
     pivot = (df.pivot_table(index="model", columns="time_bucket",
                              values=col, aggfunc="first")
-             .reindex(models_here)
-             .reindex(columns=WINDOWS)
+             .reindex(models_here).reindex(columns=WINDOWS)
              .astype(float).fillna(0))
     pivot.columns = wlabels_list
 
-    # Annotation includes value + n_triggers from the n_row reference model
-    n_vals = (df[df["model"] == models_here[0]]
-              .set_index("time_bucket")
-              .reindex(WINDOWS)["n_triggers"]
-              .fillna(0))
     annot = np.full(pivot.shape, "", dtype=object)
     for i, model in enumerate(models_here):
-        for j, w in enumerate(WINDOWS):
+        for j in range(len(WINDOWS)):
             v = pivot.iloc[i, j]
             n = n_vals.iloc[j]
             annot[i, j] = f"{v:.3f}\nn={int(n):,}"
@@ -135,21 +133,64 @@ plt.show()
 
 
 # ════════════════════════════════════════════════════════════
-# CHART 3 — Summary table
+# CHART 3 — Grouped bar: metric × model per window
+# One chart per window — all 4 metrics side by side per model
 # ════════════════════════════════════════════════════════════
-display(Markdown("---\n### Summary Table — All Metrics at K=5"))
+for window in WINDOWS:
+    sub = df[df["time_bucket"] == window]
+    if sub.empty:
+        continue
 
+    metric_cols   = [c for c, _ in METRICS]
+    metric_labels = [l for _, l in METRICS]
+    n_metrics     = len(metric_cols)
+    n_models      = len(models_here)
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    x = np.arange(n_metrics)
+    w = 0.7 / n_models
+
+    for i, model in enumerate(models_here):
+        row  = sub[sub["model"] == model]
+        vals = [row[c].values[0] if len(row) > 0 else 0 for c in metric_cols]
+        bars = ax.bar(x + i * w - (n_models - 1) * w / 2, vals, w,
+                      label=model, color=MCOLORS.get(model, "#999"),
+                      edgecolor="white", alpha=0.9)
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() / 2,
+                    f"{v:.3f}", ha="center", va="center",
+                    fontsize=9, color="white", fontweight="bold")
+
+    n_here = sub[sub["model"] == models_here[0]]["n_triggers"].values
+    n_here = int(n_here[0]) if len(n_here) > 0 else 0
+    ax.set_xticks(x)
+    ax.set_xticklabels(metric_labels, fontsize=12)
+    ax.set_title(f"All Metrics at K=5 — {WLABELS[window]}  (n={n_here:,} triggers)",
+                 fontsize=12, fontweight="bold")
+    ax.set_ylabel("Score")
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=10)
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+    plt.tight_layout()
+    plt.savefig(f"analysis_05_bars_{window}.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+
+# ════════════════════════════════════════════════════════════
+# Summary tables
+# ════════════════════════════════════════════════════════════
+display(Markdown("---\n### Summary Tables — All Metrics at K=5"))
 for window in WINDOWS:
     sub = (df[df["time_bucket"] == window]
-           [["model", "n_triggers", "hit_at_5", "ndcg_at_5",
-             "precision_at_5", "recall_at_5"]]
+           [["model", "n_triggers",
+             "hit_at_5", "ndcg_at_5", "precision_at_5", "recall_at_5"]]
            .rename(columns={
                "model": "Model", "n_triggers": "Triggers",
                "hit_at_5": "Hit@5", "ndcg_at_5": "NDCG@5",
                "precision_at_5": "Precision@5", "recall_at_5": "Recall@5",
            })
-           .set_index("Model")
-           .reindex(models_here))
+           .set_index("Model").reindex(models_here))
     display(Markdown(f"**{WLABELS[window]}**"))
     display(sub)
 
