@@ -42,7 +42,7 @@ display(Markdown(f"""
 """))
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-SAMPLE      = "1pct"
+SAMPLE      = "5pct"
 K_VALUES    = [1, 3, 5]
 WINDOWS     = ["T0_30", "T30_60", "T60_180"]
 PAD_IDX     = 0
@@ -336,21 +336,37 @@ display(Markdown(f"**Section 4:** {time.time()-t0:.1f}s"))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 5 — SCORE TRIGGERS AND WRITE TO BIGQUERY
+# Vectorized: topk + hit@k + ndcg@k computed on GPU per batch
+# Python loop only assembles strings — unavoidable for BQ row format
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
 display(Markdown("---\n## Section 5 — Score Triggers"))
-print("Section 5 — scoring triggers...")
+print("Section 5 — scoring triggers (vectorized)...")
 
 score_loader = DataLoader(
     BERT4RecDataset(test_data),
     batch_size=BATCH_SIZE, shuffle=False, **_loader_kwargs
 )
 
+# Precompute discount vectors on GPU once
+SCORE_K    = 5
+disc_score = (1.0 / torch.log2(
+    torch.arange(2, SCORE_K + 2, dtype=torch.float32)
+)).to(DEVICE)                                            # [5]
+
+# Precompute idx_to_specialty as numpy array for fast indexing
+max_idx     = max(idx_to_specialty.keys()) + 1
+spec_lookup = np.array(["UNK"] * max_idx, dtype=object)
+for idx, sp in idx_to_specialty.items():
+    spec_lookup[idx] = sp
+
+BUCKET_KEY = {"T0_30": "lab_t30", "T30_60": "lab_t60", "T60_180": "lab_t180"}
+
 all_rows   = []
 record_idx = 0
 
 with torch.no_grad():
-    for batch in score_loader:
+    for batch_idx, batch in enumerate(score_loader):
         seq   = batch["sequence"].to(DEVICE, non_blocking=True)
         tm    = batch["target_mask"].to(DEVICE, non_blocking=True)
         m30   = batch["is_t30"].to(DEVICE, non_blocking=True)
@@ -363,39 +379,65 @@ with torch.no_grad():
         p30  = torch.sigmoid(p30.float())
         p60  = torch.sigmoid(p60.float())
         p180 = torch.sigmoid(p180.float())
+        bs   = seq.size(0)
 
-        bs = seq.size(0)
-        for i in range(bs):
-            ri = record_idx + i
-            for window, pred, mask in [
-                ("T0_30",   p30[i],  m30[i]),
-                ("T30_60",  p60[i],  m60[i]),
-                ("T60_180", p180[i], m180[i]),
-            ]:
-                if not mask.item():
-                    continue
+        for window, pred, mask in [
+            ("T0_30",   p30,  m30),
+            ("T30_60",  p60,  m60),
+            ("T60_180", p180, m180),
+        ]:
+            n_qual = mask.sum().item()
+            if n_qual == 0:
+                continue
 
-                top5_vals, top5_idx = torch.topk(pred, 5)
-                top5_specs  = [idx_to_specialty.get(int(idx.item()), "UNK")
-                               for idx in top5_idx]
-                top5_scores = [round(float(v.item()), 4) for v in top5_vals]
+            pred_m  = pred[mask].float()                 # [n, C]
+            qual_ri = record_idx + mask.nonzero(as_tuple=True)[0].cpu().numpy()
+            lbl_np  = test_data[BUCKET_KEY[window]][qual_ri]  # [n, C]
+            lbl_m   = torch.from_numpy(lbl_np).to(DEVICE)
 
-                bucket_key  = {"T0_30": "lab_t30", "T30_60": "lab_t60", "T60_180": "lab_t180"}
-                true_vec    = test_data[bucket_key[window]][ri]
-                true_specs  = [idx_to_specialty[j]
-                               for j in range(len(true_vec))
-                               if true_vec[j] > 0 and j in idx_to_specialty]
-                true_set    = set(true_specs)
+            # Vectorized top-5 — one call for all n records
+            top5_vals, top5_idx = torch.topk(pred_m, SCORE_K, dim=1)  # [n, 5]
 
-                def hit_k(k):
-                    return 1.0 if set(top5_specs[:k]) & true_set else 0.0
+            # Vectorized hits matrix [n, 5]
+            hits = lbl_m.gather(1, top5_idx)                  # [n, 5]
 
-                def ndcg_k(k):
-                    disc = [1.0 / np.log2(r + 2) for r in range(k)]
-                    dcg  = sum(disc[r] for r, sp in enumerate(top5_specs[:k]) if sp in true_set)
-                    n    = min(len(true_set), k)
-                    idcg = sum(1.0 / np.log2(r + 2) for r in range(n))
-                    return round(dcg / idcg, 4) if idcg > 0 else 0.0
+            # hit@k — [n] for k=1,3,5
+            hit1 = (hits[:, :1].sum(1) > 0).float()
+            hit3 = (hits[:, :3].sum(1) > 0).float()
+            hit5 = (hits[:, :5].sum(1) > 0).float()
+
+            # ndcg@k vectorized
+            n_true = lbl_m.sum(1)
+
+            def vec_ndcg(k):
+                d    = disc_score[:k]
+                dcg  = (hits[:, :k].float() * d).sum(1)
+                ni   = n_true.clamp(max=k).long()
+                idcg = torch.stack([d[:ni_i].sum() for ni_i in ni])
+                return (dcg / idcg.clamp(min=1e-8)).cpu().numpy()
+
+            ndcg1 = vec_ndcg(1)
+            ndcg3 = vec_ndcg(3)
+            ndcg5 = vec_ndcg(5)
+
+            # Pull GPU tensors to CPU once per window per batch
+            top5_idx_cpu  = top5_idx.cpu().numpy()
+            top5_vals_cpu = top5_vals.cpu().numpy()
+            hit1_cpu      = hit1.cpu().numpy()
+            hit3_cpu      = hit3.cpu().numpy()
+            hit5_cpu      = hit5.cpu().numpy()
+
+            # Python loop — only string assembly
+            for j, ri in enumerate(qual_ri):
+                top5_specs  = [str(spec_lookup[top5_idx_cpu[j, r]])
+                               for r in range(SCORE_K)]
+                top5_scores = [round(float(top5_vals_cpu[j, r]), 4)
+                               for r in range(SCORE_K)]
+
+                true_positions = np.where(lbl_np[j] > 0)[0]
+                true_specs     = [str(spec_lookup[p])
+                                  for p in true_positions
+                                  if p < max_idx and spec_lookup[p] != "UNK"]
 
                 all_rows.append({
                     "member_id":        str(test_data["member_ids"][ri]),
@@ -406,17 +448,22 @@ with torch.no_grad():
                     "true_labels":      "|".join(sorted(true_specs)),
                     "top5_predictions": "|".join(top5_specs),
                     "top5_scores":      "|".join(str(s) for s in top5_scores),
-                    "hit_at_1":         hit_k(1),
-                    "hit_at_3":         hit_k(3),
-                    "hit_at_5":         hit_k(5),
-                    "ndcg_at_1":        ndcg_k(1),
-                    "ndcg_at_3":        ndcg_k(3),
-                    "ndcg_at_5":        ndcg_k(5),
+                    "hit_at_1":         float(hit1_cpu[j]),
+                    "hit_at_3":         float(hit3_cpu[j]),
+                    "hit_at_5":         float(hit5_cpu[j]),
+                    "ndcg_at_1":        round(float(ndcg1[j]), 4),
+                    "ndcg_at_3":        round(float(ndcg3[j]), 4),
+                    "ndcg_at_5":        round(float(ndcg5[j]), 4),
                     "model":            "BERT4Rec",
                     "sample":           SAMPLE,
                     "run_timestamp":    RUN_TIMESTAMP,
                 })
+
         record_idx += bs
+
+        if (batch_idx + 1) % 100 == 0:
+            print(f"  Batch {batch_idx+1}/{len(score_loader)} | "
+                  f"Rows so far: {len(all_rows):,}")
 
 print(f"Scored {len(all_rows):,} trigger-window pairs")
 
