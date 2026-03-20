@@ -1,58 +1,23 @@
 # ============================================================
-# NB_08 — SASRec Training and Evaluation
-# Sources : A870800_gen_rec_train_sequences_{SAMPLE} (pre-built)
-#           A870800_gen_rec_test_sequences_{SAMPLE}  (pre-built)
-#           A870800_gen_rec_model_train_{SAMPLE}     (pre-built)
-#           A870800_gen_rec_model_test_{SAMPLE}      (pre-built)
-# Metrics : Hit@K, Precision@K, Recall@K, NDCG@K
-#           K = 1, 3, 5 per T0_30, T30_60, T60_180
+# Model_01_sasrec_train.py
+# Purpose : Train SASRec on pre-built train dataset
+# Input   : ./cache_model_data_{SAMPLE}/train_*.npy + vocab.pkl
+# Output  : /home/jupyter/models/sasrec_{SAMPLE}_{TS}.pt
+#           /home/jupyter/models/sasrec_{SAMPLE}_{TS}_vocab.pkl
 # ============================================================
 import gc
 import os
 import pickle
 import time
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from collections import defaultdict
 from datetime import datetime, timezone
-from google.cloud import bigquery
 from IPython.display import display, Markdown
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 print("Imports done")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# QA HELPER
-# ══════════════════════════════════════════════════════════════════════════════
-def qa_df(df, label, sample_n=3, check_cols=None):
-    print(f"\n{'='*60}")
-    print(f"QA: {label}")
-    print(f"  Shape    : {df.shape[0]:,} rows x {df.shape[1]} cols")
-    nulls = df.isnull().sum()
-    null_cols = nulls[nulls > 0]
-    if len(null_cols) > 0:
-        for col, n in null_cols.items():
-            print(f"  NULL {col}: {n:,} ({n/len(df)*100:.1f}%)")
-    else:
-        print(f"  Nulls    : none")
-    if check_cols:
-        for col in check_cols:
-            if col in df.columns:
-                vc = df[col].value_counts(dropna=False).head(5)
-                print(f"  {col} top: {dict(vc)}")
-    if "trigger_date" in df.columns:
-        print(f"  trigger_date: {df['trigger_date'].min()} → {df['trigger_date'].max()}")
-    for col in ["member_id", "trigger_dx", "specialty", "specialty_id", "time_bucket"]:
-        if col in df.columns:
-            print(f"  unique {col}: {df[col].nunique():,}")
-    print(f"  Sample:\n{df.head(sample_n).to_string(index=False)}")
-    print(f"{'='*60}\n")
-
 
 # ── HARDWARE ──────────────────────────────────────────────────────────────────
 DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
@@ -85,31 +50,25 @@ PATIENCE      = 3
 K_VALUES      = [1, 3, 5]
 WINDOWS       = ["T0_30", "T30_60", "T60_180"]
 PAD_IDX       = 0
-# 2 workers — higher values fork too much RAM with large datasets
 NUM_WORKERS   = 2
 
 RUN_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
 
-DS            = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
-CACHE_DIR     = f"./cache_sasrec_{SAMPLE}"
-MODEL_DIR     = "/home/jupyter/models"
-CHECKPOINT    = f"{MODEL_DIR}/sasrec_{SAMPLE}_{RUN_TIMESTAMP}.pt"
-VOCAB_PATH    = f"{MODEL_DIR}/sasrec_{SAMPLE}_{RUN_TIMESTAMP}_vocab.pkl"
-LOAD_CACHE    = False
+CACHE_DIR  = f"./cache_model_data_{SAMPLE}"
+MODEL_DIR  = "/home/jupyter/models"
+CHECKPOINT = f"{MODEL_DIR}/sasrec_{SAMPLE}_{RUN_TIMESTAMP}.pt"
+VOCAB_PATH = f"{MODEL_DIR}/sasrec_{SAMPLE}_{RUN_TIMESTAMP}_vocab.pkl"
 
-os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 _loader_kwargs = dict(pin_memory=(DEVICE == "cuda"), num_workers=NUM_WORKERS)
 if NUM_WORKERS > 0:
     _loader_kwargs.update(prefetch_factor=2, persistent_workers=True)
 
-client = bigquery.Client(project="anbc-hcb-dev")
-
-print(f"Config done — sample={SAMPLE}, device={DEVICE}, num_workers={NUM_WORKERS}")
+print(f"Config — sample={SAMPLE}, device={DEVICE}")
 print(f"Run timestamp : {RUN_TIMESTAMP}")
 print(f"Checkpoint    : {CHECKPOINT}")
-print(f"Vocab path    : {VOCAB_PATH}")
+print(f"Cache dir     : {CACHE_DIR}")
 
 display(Markdown(f"""
 ## Config
@@ -128,262 +87,42 @@ display(Markdown(f"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 1 — PULL TRAIN SEQUENCES
+# SECTION 1 — LOAD TRAIN + VAL DATA FROM CACHE
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
-display(Markdown("---\n## Section 1 — Pull Train Sequences"))
-print("Section 1 starting...")
+display(Markdown("---\n## Section 1 — Load Train/Val Data"))
+print("Section 1 — loading from cache...")
 
-SEQ_CACHE   = f"{CACHE_DIR}/train_seq.parquet"
-VOCAB_CACHE = f"{CACHE_DIR}/vocab.pkl"
+KEYS = ["seq_matrix", "lab_t30", "lab_t60", "lab_t180",
+        "seq_lengths", "is_t30", "is_t60", "is_t180",
+        "trigger_dates", "member_ids", "trigger_dxs", "segments"]
 
-if LOAD_CACHE and os.path.exists(SEQ_CACHE) and os.path.exists(VOCAB_CACHE):
-    print("Loading from cache...")
-    seq_df = pd.read_parquet(SEQ_CACHE)
-    with open(VOCAB_CACHE, "rb") as f:
-        specialty_vocab = pickle.load(f)
-    print(f"Loaded {len(seq_df):,} rows")
-else:
-    print("Reading from BQ...")
-    seq_df = client.query(f"""
-        SELECT
-            member_id
-            ,CAST(trigger_date AS STRING)                AS trigger_date
-            ,trigger_dx
-            ,member_segment
-            ,is_t30_qualified
-            ,is_t60_qualified
-            ,is_t180_qualified
-            ,specialty_ctg_cd                            AS specialty
-            ,recency_rank
-        FROM `{DS}.A870800_gen_rec_train_sequences_{SAMPLE}`
-        ORDER BY member_id, trigger_date, trigger_dx, recency_rank
-    """).to_dataframe()
-    print(f"BQ returned {len(seq_df):,} rows")
-    qa_df(seq_df, "seq_df raw from BQ",
-          check_cols=["member_segment", "is_t30_qualified"])
+train_data = {k: np.load(f"{CACHE_DIR}/train_{k}.npy", allow_pickle=True) for k in KEYS}
+val_data   = {k: np.load(f"{CACHE_DIR}/val_{k}.npy",   allow_pickle=True) for k in KEYS}
 
-    all_specs       = sorted(seq_df["specialty"].dropna().unique().tolist())
-    specialty_vocab = {s: i + 1 for i, s in enumerate(all_specs)}
-    specialty_vocab["PAD"] = PAD_IDX
-    seq_df["specialty_id"] = (
-        seq_df["specialty"].map(specialty_vocab).fillna(PAD_IDX).astype(int)
-    )
-    print(f"Vocab built — {len(specialty_vocab):,} specialties")
-
-    seq_df.to_parquet(SEQ_CACHE, index=False)
-    with open(VOCAB_CACHE, "wb") as f:
-        pickle.dump(specialty_vocab, f)
-    print("Cached to disk")
-
-seq_df["trigger_date"] = seq_df["trigger_date"].astype(str).str[:10]
-qa_df(seq_df, "seq_df after trigger_date normalized", check_cols=["recency_rank"])
+with open(f"{CACHE_DIR}/vocab.pkl", "rb") as f:
+    specialty_vocab = pickle.load(f)
 
 NUM_SPECIALTIES = len(specialty_vocab)
-print(f"Section 1 done — vocab={NUM_SPECIALTIES}, rows={len(seq_df):,}, time={time.time()-t0:.1f}s")
-display(Markdown(f"**Vocab:** {NUM_SPECIALTIES:,} | **Rows:** {len(seq_df):,} | **Time:** {time.time()-t0:.1f}s"))
+N_train = train_data["seq_matrix"].shape[0]
+N_val   = val_data["seq_matrix"].shape[0]
+
+print(f"Train: {N_train:,} | Val: {N_val:,} | Vocab: {NUM_SPECIALTIES:,}")
+print(f"Train date range: {train_data['trigger_dates'][0]} → {train_data['trigger_dates'][-1]}")
+print(f"Val   date range: {val_data['trigger_dates'][0]} → {val_data['trigger_dates'][-1]}")
+print(f"Section 1 done — time={time.time()-t0:.1f}s")
+display(Markdown(f"**Train:** {N_train:,} | **Val:** {N_val:,} | **Vocab:** {NUM_SPECIALTIES:,} | **Time:** {time.time()-t0:.1f}s"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — PULL TRAIN LABELS
-# ══════════════════════════════════════════════════════════════════════════════
-t0 = time.time()
-display(Markdown("---\n## Section 2 — Pull Train Labels"))
-print("Section 2 starting...")
-
-LABEL_CACHE = f"{CACHE_DIR}/train_labels.parquet"
-
-if LOAD_CACHE and os.path.exists(LABEL_CACHE):
-    print("Loading from cache...")
-    label_df = pd.read_parquet(LABEL_CACHE)
-else:
-    print("Reading from BQ...")
-    label_df = client.query(f"""
-        SELECT
-            member_id
-            ,CAST(trigger_date AS STRING)                AS trigger_date
-            ,trigger_dx
-            ,time_bucket
-            ,ARRAY_AGG(DISTINCT label_specialty
-                ORDER BY label_specialty)                AS true_label_set
-        FROM `{DS}.A870800_gen_rec_model_train_{SAMPLE}`
-        WHERE label_specialty IS NOT NULL
-        GROUP BY member_id, trigger_date, trigger_dx, time_bucket
-    """).to_dataframe()
-    label_df.to_parquet(LABEL_CACHE, index=False)
-    print(f"Cached — {len(label_df):,} rows")
-
-label_df["trigger_date"] = label_df["trigger_date"].astype(str).str[:10]
-qa_df(label_df, "label_df after trigger_date normalized", check_cols=["time_bucket"])
-
-# Key overlap check — if zero overlap, labels will be all-empty
-seq_dates = set(seq_df["trigger_date"].unique())
-lbl_dates = set(label_df["trigger_date"].unique())
-overlap   = seq_dates & lbl_dates
-print(f"trigger_date overlap: seq={len(seq_dates):,} label={len(lbl_dates):,} overlap={len(overlap):,}")
-if len(overlap) == 0:
-    print("CRITICAL: No trigger_date overlap — all labels will be empty")
-elif len(overlap) < len(seq_dates) * 0.5:
-    print(f"WARNING: <50% overlap — many labels will be empty")
-
-print(f"Section 2 done — {len(label_df):,} rows, time={time.time()-t0:.1f}s")
-display(Markdown(f"**Label rows:** {len(label_df):,} | **Time:** {time.time()-t0:.1f}s"))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — BUILD DATASET
-# Vectorized — no Python dict per record
-# Returns dict of numpy matrices — no list of dicts
-# Memory: ~2.7GB for 3.5M records vs ~17GB for list-of-dicts
+# SECTION 2 — DATASET AND DATALOADER
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
-display(Markdown("---\n## Section 3 — Build Dataset"))
-print("Section 3 starting...")
-
-
-def build_records_fast(seq_df, label_df, specialty_vocab, max_seq_len, num_specialties):
-    print(f"  Building label lookup from {len(label_df):,} rows...")
-    label_wide = {
-        (row.member_id, row.trigger_date, row.trigger_dx, row.time_bucket): row.true_label_set
-        for row in label_df.itertuples(index=False)
-    }
-    print(f"  Label lookup: {len(label_wide):,} keys")
-
-    print(f"  Grouping {len(seq_df):,} rows...")
-    grouped = (
-        seq_df
-        .sort_values(["member_id", "trigger_date", "trigger_dx", "recency_rank"])
-        .groupby(
-            ["member_id", "trigger_date", "trigger_dx",
-             "member_segment", "is_t30_qualified",
-             "is_t60_qualified", "is_t180_qualified"],
-            sort=False
-        )["specialty_id"]
-        .apply(list)
-    )
-    N = len(grouped)
-    print(f"  Grouped into {N:,} triggers")
-
-    # Seq length stats
-    seq_lens_all = grouped.apply(len)
-    print(f"  Seq length — min={seq_lens_all.min()} "
-          f"median={seq_lens_all.median():.0f} "
-          f"max={seq_lens_all.max()} "
-          f"zero={(seq_lens_all == 0).sum():,}")
-
-    # Pre-allocate all arrays for N entries
-    seq_matrix  = np.zeros((N, max_seq_len), dtype=np.int64)
-    seq_lengths = np.zeros(N, dtype=np.int64)
-    lab_t30     = np.zeros((N, num_specialties), dtype=np.float32)
-    lab_t60     = np.zeros((N, num_specialties), dtype=np.float32)
-    lab_t180    = np.zeros((N, num_specialties), dtype=np.float32)
-    is_t30_arr  = np.zeros(N, dtype=bool)
-    is_t60_arr  = np.zeros(N, dtype=bool)
-    is_t180_arr = np.zeros(N, dtype=bool)
-
-    # String metadata — appended for ALL N entries (including zero-length)
-    # so filtering with valid mask is consistent
-    trigger_dates_all = []
-    member_ids_all    = []
-    trigger_dxs_all   = []
-    segments_all      = []
-
-    # multihot helper — defined once outside loop
-    def fill_multihot(lab_arr, i, prefix, bucket):
-        for sp in label_wide.get((*prefix, bucket), []):
-            idx = specialty_vocab.get(sp)
-            if idx and idx > 0:
-                lab_arr[i, idx - 1] = 1.0
-
-    skipped = 0
-    for i, (key, ids) in enumerate(grouped.items()):
-        member_id, trigger_date, trigger_dx, seg, t30, t60, t180 = key
-
-        # Always append metadata — keeps list length == N for consistent filtering
-        trigger_dates_all.append(trigger_date)
-        member_ids_all.append(member_id)
-        trigger_dxs_all.append(trigger_dx)
-        segments_all.append(str(seg))
-
-        is_t30_arr[i]  = bool(t30)
-        is_t60_arr[i]  = bool(t60)
-        is_t180_arr[i] = bool(t180)
-
-        if len(ids) == 0:
-            skipped += 1
-            continue
-
-        ids    = ids[-max_seq_len:]
-        seq_len = len(ids)
-        seq_lengths[i] = seq_len
-        seq_matrix[i, max_seq_len - seq_len:] = ids
-
-        prefix = (member_id, trigger_date, trigger_dx)
-        fill_multihot(lab_t30,  i, prefix, "T0_30")
-        fill_multihot(lab_t60,  i, prefix, "T30_60")
-        fill_multihot(lab_t180, i, prefix, "T60_180")
-
-    print(f"  Loop done — skipped zero-length: {skipped:,}")
-
-    # Filter to valid (non-zero-length) sequences
-    valid = seq_lengths > 0
-    n_valid = valid.sum()
-
-    seq_matrix_f    = seq_matrix[valid]
-    seq_lengths_f   = seq_lengths[valid]
-    lab_t30_f       = lab_t30[valid]
-    lab_t60_f       = lab_t60[valid]
-    lab_t180_f      = lab_t180[valid]
-    is_t30_f        = is_t30_arr[valid]
-    is_t60_f        = is_t60_arr[valid]
-    is_t180_f       = is_t180_arr[valid]
-
-    # Free pre-filter arrays — boolean indexing created copies above
-    del seq_matrix, seq_lengths, lab_t30, lab_t60, lab_t180
-    del is_t30_arr, is_t60_arr, is_t180_arr
-    gc.collect()
-
-    # Filter string metadata using same valid mask
-    valid_list        = valid.tolist()
-    trigger_dates_f   = np.array([trigger_dates_all[i] for i, v in enumerate(valid_list) if v])
-    member_ids_f      = np.array([member_ids_all[i]    for i, v in enumerate(valid_list) if v])
-    trigger_dxs_f     = np.array([trigger_dxs_all[i]   for i, v in enumerate(valid_list) if v])
-    segments_f        = np.array([segments_all[i]       for i, v in enumerate(valid_list) if v])
-    del trigger_dates_all, member_ids_all, trigger_dxs_all, segments_all
-    gc.collect()
-
-    # Vectorized QA — no Python loops over records
-    any_label = (
-        (lab_t30_f.sum(axis=1) + lab_t60_f.sum(axis=1) + lab_t180_f.sum(axis=1)) > 0
-    )
-    print(f"\n  {'='*50}")
-    print(f"  Records: {n_valid:,} | Skipped: {skipped:,}")
-    print(f"  Have labels    : {any_label.sum():,} ({any_label.mean()*100:.1f}%)")
-    print(f"  T0_30  qual    : {is_t30_f.sum():,} | labeled: {(lab_t30_f.sum(axis=1) > 0).sum():,}")
-    print(f"  T30_60 qual    : {is_t60_f.sum():,} | labeled: {(lab_t60_f.sum(axis=1) > 0).sum():,}")
-    print(f"  T60_180 qual   : {is_t180_f.sum():,} | labeled: {(lab_t180_f.sum(axis=1) > 0).sum():,}")
-    if any_label.sum() == 0:
-        print("  CRITICAL: Zero records have labels — check trigger_date key format")
-    print(f"  {'='*50}\n")
-
-    return {
-        "seq_matrix":    seq_matrix_f,
-        "seq_lengths":   seq_lengths_f,
-        "lab_t30":       lab_t30_f,
-        "lab_t60":       lab_t60_f,
-        "lab_t180":      lab_t180_f,
-        "is_t30":        is_t30_f,
-        "is_t60":        is_t60_f,
-        "is_t180":       is_t180_f,
-        "trigger_dates": trigger_dates_f,
-        "member_ids":    member_ids_f,
-        "trigger_dxs":   trigger_dxs_f,
-        "segments":      segments_f,
-    }
+display(Markdown("---\n## Section 2 — Dataset"))
+print("Section 2 — building dataset...")
 
 
 class SpecialtyDataset(Dataset):
-    """Dataset backed by numpy matrices — no per-record dict overhead."""
     def __init__(self, data):
         self.seq      = data["seq_matrix"]
         self.lengths  = data["seq_lengths"]
@@ -410,55 +149,22 @@ class SpecialtyDataset(Dataset):
         }
 
 
-# Build train data
-data = build_records_fast(seq_df, label_df, specialty_vocab, MAX_SEQ_LEN, NUM_SPECIALTIES)
-
-# Free BQ dataframes — no longer needed
-del seq_df, label_df
-gc.collect()
-print("seq_df and label_df freed")
-
-# Temporal sort — YYYY-MM-DD strings sort correctly as lexicographic == chronological
-print("Sorting by trigger_date...")
-sort_idx = np.argsort(data["trigger_dates"])
-for k in data:
-    data[k] = data[k][sort_idx]
-
-N     = data["seq_matrix"].shape[0]
-n_val = max(1, int(N * 0.1))
-split = N - n_val
-
-# Views — no copy, lower peak RAM
-train_data = {k: v[:split] for k, v in data.items()}
-val_data   = {k: v[split:] for k, v in data.items()}
-del data
-gc.collect()
-print("Unsplit data freed")
-
-# QA split
-print(f"  Train: {split:,} | Val: {n_val:,}")
-print(f"  Train date range: {train_data['trigger_dates'][0]} → {train_data['trigger_dates'][-1]}")
-print(f"  Val   date range: {val_data['trigger_dates'][0]} → {val_data['trigger_dates'][-1]}")
-if val_data["trigger_dates"][0] < train_data["trigger_dates"][-1]:
-    print("  WARNING: Val dates overlap with train — check sort")
-else:
-    print("  Train/val split correct — val dates follow train")
-
 train_loader = DataLoader(SpecialtyDataset(train_data),
                           batch_size=BATCH_SIZE, shuffle=True, **_loader_kwargs)
 val_loader   = DataLoader(SpecialtyDataset(val_data),
                           batch_size=BATCH_SIZE * 2, shuffle=False, **_loader_kwargs)
 
-print(f"Section 3 done — time={time.time()-t0:.1f}s")
-display(Markdown(f"**Train:** {split:,} | **Val:** {n_val:,} | **Time:** {time.time()-t0:.1f}s"))
+print(f"Train loader: {len(train_loader)} batches | Val loader: {len(val_loader)} batches")
+print(f"Section 2 done — time={time.time()-t0:.1f}s")
+display(Markdown(f"**Batches — Train:** {len(train_loader)} | **Val:** {len(val_loader)} | **Time:** {time.time()-t0:.1f}s"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — SASREC MODEL
+# SECTION 3 — SASREC MODEL
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
-display(Markdown("---\n## Section 4 — SASRec Model"))
-print("Section 4 starting...")
+display(Markdown("---\n## Section 3 — SASRec Model"))
+print("Section 3 — building model...")
 
 
 class PointWiseFeedForward(nn.Module):
@@ -568,22 +274,19 @@ print(f"Attribute check: emb_drop={hasattr(raw_check,'emb_drop')} | "
       f"blocks={hasattr(raw_check,'blocks')}")
 
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"Section 4 done — {n_params:,} parameters, time={time.time()-t0:.1f}s")
+print(f"Section 3 done — {n_params:,} parameters, time={time.time()-t0:.1f}s")
 display(Markdown(f"**Parameters:** {n_params:,} | **Time:** {time.time()-t0:.1f}s"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — EVALUATION FUNCTIONS
-# _disc_cache and _bce_eval at module level — not instantiated per call
+# SECTION 4 — EVALUATION FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
-print("Section 5 — defining evaluation functions...")
+print("Section 4 — defining evaluation functions...")
 
-# Precompute discount vectors per K — moved to GPU on first use
 _disc_cache = {
     k: 1.0 / torch.log2(torch.arange(2, k + 2, dtype=torch.float32))
     for k in K_VALUES
 }
-# Single BCEWithLogitsLoss instance shared across train and eval
 _bce_eval = nn.BCEWithLogitsLoss()
 
 
@@ -606,10 +309,9 @@ def metrics_at_k(pred, label, k):
 def evaluate(loader, mdl):
     raw = get_raw(mdl)
     raw.eval()
-    sums              = defaultdict(float)
-    counts            = defaultdict(int)
-    val_loss_sum      = 0.0
-    val_loss_count    = 0
+    sums, counts       = defaultdict(float), defaultdict(int)
+    val_loss_sum       = 0.0
+    val_loss_count     = 0
 
     with torch.no_grad():
         for batch in loader:
@@ -687,11 +389,11 @@ print("Evaluation functions defined")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 6 — TRAINING
+# SECTION 5 — TRAINING
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
-display(Markdown("---\n## Section 6 — Training"))
-print(f"Section 6 — {EPOCHS} epochs, {len(train_loader)} batches/epoch")
+display(Markdown("---\n## Section 5 — Training"))
+print(f"Section 5 — {EPOCHS} epochs, {len(train_loader)} batches/epoch")
 
 optimizer  = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 scheduler  = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
@@ -812,353 +514,6 @@ for epoch in range(EPOCHS):
             display(Markdown(f"Early stopping at epoch {epoch+1}"))
             break
 
-print(f"Section 6 done — time={time.time()-t0:.1f}s")
-display(Markdown(f"**Section 6 total:** {time.time()-t0:.1f}s"))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — TEST EVALUATION
-# ══════════════════════════════════════════════════════════════════════════════
-t0 = time.time()
-display(Markdown("---\n## Section 7 — Test Evaluation"))
-print("Section 7 starting — loading checkpoint...")
-
-ckpt    = torch.load(CHECKPOINT, weights_only=False)
-cfg     = ckpt["config"]
-
-model_cfg = {
-    "num_specialties": cfg["num_specialties"],
-    "embedding_dim":   cfg["embedding_dim"],
-    "max_seq_len":     cfg["max_seq_len"],
-    "num_heads":       cfg["num_heads"],
-    "num_blocks":      cfg["num_blocks"],
-    "dropout":         cfg["dropout"],
-    "num_classes":     cfg["num_specialties"],
-}
-t_model = SASRec(**model_cfg).to(DEVICE)
-t_model.load_state_dict(ckpt["model_state"])
-idx_to_specialty = ckpt["idx_to_specialty"]
-print(f"Checkpoint loaded — epoch {ckpt['epoch']+1}, NDCG: {ckpt['best_val_ndcg']:.4f}")
-print(f"idx_to_specialty entries: {len(idx_to_specialty):,}")
-
-print("Reading test sequences from BQ...")
-test_seq_df = client.query(f"""
-    SELECT
-        member_id
-        ,CAST(trigger_date AS STRING)                    AS trigger_date
-        ,trigger_dx
-        ,member_segment
-        ,is_t30_qualified
-        ,is_t60_qualified
-        ,is_t180_qualified
-        ,specialty_ctg_cd                                AS specialty
-        ,recency_rank
-    FROM `{DS}.A870800_gen_rec_test_sequences_{SAMPLE}`
-    ORDER BY member_id, trigger_date, trigger_dx, recency_rank
-""").to_dataframe()
-test_seq_df["trigger_date"]  = test_seq_df["trigger_date"].astype(str).str[:10]
-test_seq_df["specialty_id"]  = (
-    test_seq_df["specialty"].map(specialty_vocab).fillna(PAD_IDX).astype(int)
-)
-print(f"Test sequences: {len(test_seq_df):,} rows")
-qa_df(test_seq_df, "test_seq_df", check_cols=["recency_rank"])
-
-oov = test_seq_df["specialty"].map(specialty_vocab).isna().sum()
-print(f"OOV test specialties: {oov:,} ({oov/len(test_seq_df)*100:.1f}%) → mapped to PAD")
-
-print("Reading test labels from BQ...")
-test_label_df = client.query(f"""
-    SELECT
-        member_id
-        ,CAST(trigger_date AS STRING)                    AS trigger_date
-        ,trigger_dx
-        ,time_bucket
-        ,ARRAY_AGG(DISTINCT label_specialty
-            ORDER BY label_specialty)                    AS true_label_set
-    FROM `{DS}.A870800_gen_rec_model_test_{SAMPLE}`
-    WHERE label_specialty IS NOT NULL
-    GROUP BY member_id, trigger_date, trigger_dx, time_bucket
-""").to_dataframe()
-test_label_df["trigger_date"] = test_label_df["trigger_date"].astype(str).str[:10]
-print(f"Test labels: {len(test_label_df):,} rows")
-qa_df(test_label_df, "test_label_df", check_cols=["time_bucket"])
-
-# Overlap check
-t_seq_dates = set(test_seq_df["trigger_date"].unique())
-t_lbl_dates = set(test_label_df["trigger_date"].unique())
-t_overlap   = t_seq_dates & t_lbl_dates
-print(f"Test trigger_date overlap: seq={len(t_seq_dates):,} label={len(t_lbl_dates):,} overlap={len(t_overlap):,}")
-if len(t_overlap) == 0:
-    print("CRITICAL: No test trigger_date overlap — metrics will be zero")
-
-print("Building test data...")
-test_data = build_records_fast(
-    test_seq_df, test_label_df, specialty_vocab, MAX_SEQ_LEN, NUM_SPECIALTIES
-)
-del test_seq_df, test_label_df
-gc.collect()
-print(f"Test data built — {test_data['seq_matrix'].shape[0]:,} records")
-
-test_loader = DataLoader(
-    SpecialtyDataset(test_data),
-    batch_size=BATCH_SIZE * 2, shuffle=False, **_loader_kwargs
-)
-
-print(f"Running test evaluation on {test_data['seq_matrix'].shape[0]:,} records...")
-test_metrics = evaluate(test_loader, t_model)
-print_metrics(test_metrics, "TEST RESULTS")
-
-print(f"Section 7 done — time={time.time()-t0:.1f}s")
-display(Markdown(f"**Section 7:** {time.time()-t0:.1f}s"))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 7B — SCORE TRIGGERS AND WRITE TO BIGQUERY
-# One row per member + trigger + time_bucket
-# Table: A870800_gen_rec_trigger_scores (APPEND)
-# ══════════════════════════════════════════════════════════════════════════════
-t0 = time.time()
-display(Markdown("---\n## Section 7B — Score Triggers"))
-print("Section 7B — scoring test triggers...")
-
-score_loader = DataLoader(
-    SpecialtyDataset(test_data),
-    batch_size=BATCH_SIZE * 2, shuffle=False, **_loader_kwargs
-)
-
-t_model.eval()
-all_rows   = []
-record_idx = 0
-
-with torch.no_grad():
-    for batch in score_loader:
-        seq  = batch["sequence"].to(DEVICE, non_blocking=True)
-        lens = batch["seq_len"].to(DEVICE, non_blocking=True)
-        m30  = batch["is_t30"].to(DEVICE, non_blocking=True)
-        m60  = batch["is_t60"].to(DEVICE, non_blocking=True)
-        m180 = batch["is_t180"].to(DEVICE, non_blocking=True)
-
-        with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
-            p30, p60, p180 = t_model(seq, lens)
-
-        # Sigmoid to get probabilities from logits
-        p30  = torch.sigmoid(p30.float())
-        p60  = torch.sigmoid(p60.float())
-        p180 = torch.sigmoid(p180.float())
-
-        bs = seq.size(0)
-        for i in range(bs):
-            ri = record_idx + i
-            for window, pred, mask in [
-                ("T0_30",   p30[i],  m30[i]),
-                ("T30_60",  p60[i],  m60[i]),
-                ("T60_180", p180[i], m180[i]),
-            ]:
-                if not mask.item():
-                    continue
-
-                top5_vals, top5_idx = torch.topk(pred, 5)
-                top5_specs  = [idx_to_specialty.get(int(idx.item()), "UNK")
-                               for idx in top5_idx]
-                top5_scores = [round(float(v.item()), 4) for v in top5_vals]
-
-                bucket_key  = {"T0_30": "lab_t30", "T30_60": "lab_t60", "T60_180": "lab_t180"}
-                true_vec    = test_data[bucket_key[window]][ri]
-                true_specs  = [idx_to_specialty[j]
-                               for j in range(len(true_vec)) if true_vec[j] > 0
-                               and j in idx_to_specialty]
-                true_set    = set(true_specs)
-
-                def hit_k(k):
-                    return 1.0 if set(top5_specs[:k]) & true_set else 0.0
-
-                def ndcg_k(k):
-                    disc = [1.0 / np.log2(r + 2) for r in range(k)]
-                    dcg  = sum(disc[r] for r, sp in enumerate(top5_specs[:k]) if sp in true_set)
-                    n    = min(len(true_set), k)
-                    idcg = sum(1.0 / np.log2(r + 2) for r in range(n))
-                    return round(dcg / idcg, 4) if idcg > 0 else 0.0
-
-                all_rows.append({
-                    "member_id":        str(test_data["member_ids"][ri]),
-                    "trigger_date":     str(test_data["trigger_dates"][ri]),
-                    "trigger_dx":       str(test_data["trigger_dxs"][ri]),
-                    "member_segment":   str(test_data["segments"][ri]),
-                    "time_bucket":      window,
-                    "true_labels":      "|".join(sorted(true_specs)),
-                    "top5_predictions": "|".join(top5_specs),
-                    "top5_scores":      "|".join(str(s) for s in top5_scores),
-                    "hit_at_1":         hit_k(1),
-                    "hit_at_3":         hit_k(3),
-                    "hit_at_5":         hit_k(5),
-                    "ndcg_at_1":        ndcg_k(1),
-                    "ndcg_at_3":        ndcg_k(3),
-                    "ndcg_at_5":        ndcg_k(5),
-                    "model":            "SASRec",
-                    "sample":           SAMPLE,
-                    "run_timestamp":    RUN_TIMESTAMP,
-                })
-        record_idx += bs
-
-print(f"Scored {len(all_rows):,} trigger-window pairs")
-
-BATCH_BQ = 100_000
-schema = [
-    bigquery.SchemaField("member_id",        "STRING"),
-    bigquery.SchemaField("trigger_date",     "STRING"),
-    bigquery.SchemaField("trigger_dx",       "STRING"),
-    bigquery.SchemaField("member_segment",   "STRING"),
-    bigquery.SchemaField("time_bucket",      "STRING"),
-    bigquery.SchemaField("true_labels",      "STRING"),
-    bigquery.SchemaField("top5_predictions", "STRING"),
-    bigquery.SchemaField("top5_scores",      "STRING"),
-    bigquery.SchemaField("hit_at_1",         "FLOAT64"),
-    bigquery.SchemaField("hit_at_3",         "FLOAT64"),
-    bigquery.SchemaField("hit_at_5",         "FLOAT64"),
-    bigquery.SchemaField("ndcg_at_1",        "FLOAT64"),
-    bigquery.SchemaField("ndcg_at_3",        "FLOAT64"),
-    bigquery.SchemaField("ndcg_at_5",        "FLOAT64"),
-    bigquery.SchemaField("model",            "STRING"),
-    bigquery.SchemaField("sample",           "STRING"),
-    bigquery.SchemaField("run_timestamp",    "STRING"),
-]
-job_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", schema=schema)
-
-for start in range(0, len(all_rows), BATCH_BQ):
-    chunk = pd.DataFrame(all_rows[start:start + BATCH_BQ])
-    client.load_table_from_dataframe(
-        chunk, f"{DS}.A870800_gen_rec_trigger_scores",
-        job_config=job_cfg
-    ).result()
-    print(f"  Written {start:,} — {min(start+BATCH_BQ, len(all_rows)):,}")
-
-print(f"Section 7B done — {len(all_rows):,} rows, time={time.time()-t0:.1f}s")
-display(Markdown(f"**7B:** {len(all_rows):,} trigger scores written | **Time:** {time.time()-t0:.1f}s"))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — WRITE METRICS TO BIGQUERY
-# ══════════════════════════════════════════════════════════════════════════════
-t0 = time.time()
-display(Markdown("---\n## Section 8 — Write Metrics"))
-print("Section 8 — writing metrics...")
-
-rows = [
-    {
-        "model":          "SASRec",
-        "sample":         SAMPLE,
-        "run_timestamp":  RUN_TIMESTAMP,
-        "time_bucket":    w,
-        "k":              k,
-        "member_segment": "ALL",
-        "hit_at_k":       round(test_metrics.get(f"{w}_hit@{k}",  0), 4),
-        "precision_at_k": round(test_metrics.get(f"{w}_prec@{k}", 0), 4),
-        "recall_at_k":    round(test_metrics.get(f"{w}_rec@{k}",  0), 4),
-        "ndcg_at_k":      round(test_metrics.get(f"{w}_ndcg@{k}", 0), 4),
-    }
-    for w in WINDOWS for k in K_VALUES
-]
-metrics_df = pd.DataFrame(rows)
-print(metrics_df.to_string(index=False))
-
-client.load_table_from_dataframe(
-    metrics_df,
-    f"{DS}.A870800_gen_rec_model_metrics",
-    job_config=bigquery.LoadJobConfig(
-        write_disposition="WRITE_APPEND",
-        schema=[
-            bigquery.SchemaField("model",          "STRING"),
-            bigquery.SchemaField("sample",         "STRING"),
-            bigquery.SchemaField("run_timestamp",  "STRING"),
-            bigquery.SchemaField("time_bucket",    "STRING"),
-            bigquery.SchemaField("k",              "INT64"),
-            bigquery.SchemaField("member_segment", "STRING"),
-            bigquery.SchemaField("hit_at_k",       "FLOAT64"),
-            bigquery.SchemaField("precision_at_k", "FLOAT64"),
-            bigquery.SchemaField("recall_at_k",    "FLOAT64"),
-            bigquery.SchemaField("ndcg_at_k",      "FLOAT64"),
-        ]
-    )
-).result()
-print(f"Section 8 done — time={time.time()-t0:.1f}s")
-display(Markdown(f"Written to `A870800_gen_rec_model_metrics` | **Time:** {time.time()-t0:.1f}s"))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — VISUALIZATION
-# ══════════════════════════════════════════════════════════════════════════════
-t0 = time.time()
-display(Markdown("---\n## Section 9 — SASRec Results"))
-print("Section 9 — loading metrics from BQ...")
-
-plot_df = client.query(f"""
-    SELECT time_bucket, k, hit_at_k, precision_at_k, recall_at_k, ndcg_at_k
-    FROM `{DS}.A870800_gen_rec_model_metrics`
-    WHERE model = 'SASRec'
-      AND sample = '{SAMPLE}'
-      AND run_timestamp = '{RUN_TIMESTAMP}'
-      AND member_segment = 'ALL'
-    ORDER BY time_bucket, k
-""").to_dataframe()
-print(f"Loaded {len(plot_df)} metric rows")
-
-if plot_df.empty:
-    print("WARNING: No metrics found — check Section 8 wrote correctly")
-else:
-    METRICS  = ["hit_at_k", "precision_at_k", "recall_at_k", "ndcg_at_k"]
-    MLABELS  = {"hit_at_k": "Hit@K", "precision_at_k": "Precision@K",
-                "recall_at_k": "Recall@K", "ndcg_at_k": "NDCG@K"}
-    WCOLORS  = {"T0_30": "#5DBE7E", "T30_60": "#F7C948", "T60_180": "#F4845F"}
-    WMARKERS = {"T0_30": "o", "T30_60": "s", "T60_180": "^"}
-
-    fig, axes = plt.subplots(2, 2, figsize=(20, 14))
-    axes = axes.flatten()
-    for i, metric in enumerate(METRICS):
-        ax = axes[i]
-        for window in WINDOWS:
-            sub = plot_df[plot_df["time_bucket"] == window].sort_values("k")
-            if sub.empty:
-                continue
-            ax.plot(sub["k"], sub[metric], color=WCOLORS[window],
-                    marker=WMARKERS[window], linewidth=2, markersize=8, label=window)
-            for _, row in sub.iterrows():
-                ax.annotate(f"{row[metric]:.3f}", (row["k"], row[metric]),
-                            textcoords="offset points", xytext=(5, 4),
-                            fontsize=8, color=WCOLORS[window])
-        ax.set_title(MLABELS[metric], fontsize=11, fontweight="bold")
-        ax.set_xlabel("K"); ax.set_ylabel(MLABELS[metric])
-        ax.set_xticks(K_VALUES); ax.legend(fontsize=9)
-        ax.grid(True, linestyle="--", alpha=0.4); ax.set_ylim(0, 1.05)
-    fig.suptitle(f"SASRec — {SAMPLE} | Run: {RUN_TIMESTAMP}",
-                 fontsize=13, fontweight="bold", y=1.01)
-    plt.tight_layout()
-    plt.savefig(f"sasrec_metrics_{SAMPLE}.png", dpi=150, bbox_inches="tight")
-    plt.show()
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    pivot = plot_df.pivot_table(
-        index="time_bucket", columns="k", values="ndcg_at_k"
-    ).reindex(WINDOWS)
-    sns.heatmap(pivot, ax=ax, cmap="YlGn", annot=True, fmt=".3f",
-                annot_kws={"size": 12}, linewidths=0.5,
-                cbar_kws={"label": "NDCG@K"})
-    ax.set_title(f"SASRec NDCG — {SAMPLE} | Run: {RUN_TIMESTAMP}",
-                 fontsize=11, fontweight="bold")
-    ax.set_xlabel("K"); ax.set_ylabel("Time Window")
-    plt.tight_layout()
-    plt.savefig(f"sasrec_ndcg_{SAMPLE}.png", dpi=150, bbox_inches="tight")
-    plt.show()
-
-    display(Markdown("### K=3 Summary"))
-    k3 = plot_df[plot_df["k"] == 3][[
-        "time_bucket", "hit_at_k", "precision_at_k", "recall_at_k", "ndcg_at_k"
-    ]].rename(columns={
-        "time_bucket": "Window", "hit_at_k": "Hit@3",
-        "precision_at_k": "Prec@3", "recall_at_k": "Recall@3", "ndcg_at_k": "NDCG@3"
-    }).reset_index(drop=True)
-    display(k3)
-    print(k3.to_string(index=False))
-
-print(f"Section 9 done — time={time.time()-t0:.1f}s")
-display(Markdown(f"**Section 9:** {time.time()-t0:.1f}s"))
-print("NB_08 SASRec complete")
+print(f"Section 5 done — time={time.time()-t0:.1f}s")
+display(Markdown(f"**Training complete** | Best NDCG: {best_ndcg:.4f} | Checkpoint: `{CHECKPOINT}`"))
+print("Model_01_sasrec_train complete")
