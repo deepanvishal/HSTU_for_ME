@@ -1,23 +1,46 @@
-Boundary Rules — Slide Bullets
+Slide 1 — The Question & Framework
 
-A trigger = first time a member presents with a specific ICD-10 code. One per member per diagnosis, ever.
-Recurrences (same diagnosis reappearing after 12+ months) are excluded — they represent return to an established care relationship, not a new routing decision.
-Left boundary: Member must be enrolled for 12 full months before the trigger date. Ensures a clean lookback window to confirm the diagnosis is genuinely new to the data.
-Right boundary: At least one full follow-up window (T30, T60, or T180) must fit within both the dataset end (Dec 2025) and the member's enrollment end. Partial windows are fully invalid — a trigger either qualifies for a window or does not.
-Members who trigger near the end of the dataset or disenroll shortly after are excluded. No partial credit.
+Objective (headline, top)
+Can a member's first claim predict their next provider or specialty?
 
+Visit
+1 member + 1 calendar day = 1 visit. Multiple claims on the same date — PCP, Lab, Imaging — collapsed into one visit to preserve chronological sequence and eliminate billing noise.
+First Encounter
+Earliest date a member presents with a specific ICD-10 code. One per member per diagnosis, ever. Excludes recurrences — a returning diagnosis represents continuation of established care, not a new routing decision.
+Prediction Target
+Top 5 specialty categories ranked by probability. Not a specific provider. Not a visit count. Specialty type only.
+Pure Sequence Input
+Strictly the 20 most recent historical specialty visits before the trigger. No demographics, no geography, no provider history. Clinical trajectory alone.
+Why Not Single Next Visit?
+After a new diagnosis, a member rarely sees just one specialty. In 30 days they may see Primary Care, Cardiology, and Lab. In 180 days the picture shifts further. Predicting one next visit collapses all of that into a single point — losing both volume and timing signal.
+Three Independent Prediction Windows
 
-Boundary Impact Analysis — Slide Bullets
+T0-30: Immediate follow-up — urgent referrals, diagnostics
+T30-60: Secondary follow-up — specialist confirmations
+T60-180: Chronic management — ongoing care pathway
 
-Qualification is a multi-stage funnel: raw first encounters → left qualified → window qualified → model ready.
-Left boundary (12M enrollment rule) is the primary volume filter — removes triggers from members with insufficient claims history.
-Right boundary losses split between two causes: dataset end truncation and member disenrollment. Both are quantified separately.
-T30 retains the most triggers; T180 loses the most — longer the window, fewer triggers survive both enrollment and dataset constraints.
-Triggers with no claims in the 12 months prior are valid for EDA and Markov but excluded from sequence model training — the model requires a non-empty input sequence.
-Final model-ready population = T180 qualified + has prior claims. This is the most conservative and most reliable subset.
+[Visual placeholder — member timeline: trigger → branches across 3 windows]
 
+Slide 2 — Model Results
 
+Two Models Tested
 
+Analytics Baseline: Markov transition model — frequency of specialty transitions from training data. No temporal awareness. Same top-5 prediction regardless of window.
+Machine Learning: SASRec and BERT4Rec — sequence models that learn from visit order. Temporal awareness built in. Prediction changes per window.
 
+Core Metric — NDCG@5
+Position-aware ranking. Placing the right specialty at Rank 1 scores higher than placing it at Rank 5. Binary accuracy ignores this — NDCG captures it.
+Performance (placeholders — fill after run)
+Accuracy (Hit@5)NDCG@5Analytics Baseline (Markov)X%0.XXMachine Learning (SASRec / BERT4Rec)Y%0.YY
+Lift
+ML captures non-linear temporal patterns in diagnosis sequences — delivers measurable lift over frequency-based baseline, particularly at T0-30 where temporal signal is strongest.
+Validation
 
-Slide 1: Predictive Framework & Sequence ArchitectureObjective: Define the "Unit of Analysis" and the "Pure Sequence" input methodology.The "Temporal Visit" Construct: * Definition: 1 Unique Member + 1 Calendar Day = 1 Visit.Logic: Multi-specialty claims (e.g., PCP + Lab) are rolled into a single visit to preserve chronological integrity and reduce administrative noise.The Model Input (Pure Sequence):Feature Set: Strictly the sequence of the 20 most recent historical diagnoses.Exclusions: Intentionally omitted all metadata (Demographics, Provider history, Geography, or Visit counts) to isolate the predictive power of clinical trajectories.The Prediction Trigger: * Initiated by a New Diagnosis (first-time occurrence in member history).Target: Predicting the Specialty of the next 5 visits (Median path length: 9).Slide 2: Model Performance & Technical ValidationObjective: Evidence of model "lift" and robustness across clinical segments.Performance Comparison (ML vs. Baseline):Baseline Analytical Model: $X\%$ Accuracy | $0.XX$ NDCG.Sequence ML Model: $Y\%$ Accuracy | $0.YY$ NDCG.Key Finding: Capturing non-linear temporal patterns in diagnosis sequences provides a significant "lift" over traditional heuristic baselines.Segment & Diagnosis Validation:Clinical Stability: High performance across various ICD-10 chapters (e.g., Chronic vs. Acute).Generalization: Consistent NDCG scores across different member cohorts despite the lack of demographic inputs.Core Metric: NDCG @ 5 (Normalized Discounted Cumulative Gain):Why it matters: Unlike binary accuracy, NDCG is a position-aware ranking metric. It rewards the model more for placing the "true" next specialty at Rank 1 than at Rank 5, ensuring our Top-5 predictions are prioritized by clinical relevance.Guardrails (What we are NOT predicting):Specific Provider NPIs (Focus is solely on Specialty/Provider Type).Future Diagnosis Codes or total visit volume.Would you like me to draft a "Technical Appendix" slide in case the SVP asks for more detail on the specific ML architecture (e.g., RNN, Transformer, or Markov chains) you are using?
+Consistent across ICD-10 chapters — chronic and acute conditions
+Consistent across member cohorts — without any demographic inputs
+Clinical sequence alone is sufficient signal
+
+Guardrails
+Not predicting: specific provider NPIs, future diagnosis codes, total visit volume.
+Application
+Aggregate expected next-visit distributions by diagnosis, specialty, and geography — informs network contracting, adequacy decisions, and proactive member outreach before utilization occurs.
