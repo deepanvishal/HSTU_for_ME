@@ -1,4 +1,3 @@
-
 # ============================================================
 # Model_03_build_test_dataset.py
 # Purpose : Pull test sequences + labels from BQ
@@ -59,15 +58,16 @@ MAX_SEQ_LEN = 20
 PAD_IDX     = 0
 
 DS        = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
-CACHE_DIR = f"./cache_model_data_{SAMPLE}"
+CACHE_DIR       = f"./cache_test_data_{SAMPLE}"
+TRAIN_CACHE_DIR = f"./cache_train_data_{SAMPLE}"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 client = bigquery.Client(project="anbc-hcb-dev")
 
 print(f"Config — sample={SAMPLE}, cache={CACHE_DIR}")
 
-# Load vocab built in Model_00 — must exist
-with open(f"{CACHE_DIR}/vocab.pkl", "rb") as f:
+# Load vocab built in Model_00 — from train cache, not test cache
+with open(f"{TRAIN_CACHE_DIR}/vocab.pkl", "rb") as f:
     specialty_vocab = pickle.load(f)
 NUM_SPECIALTIES = len(specialty_vocab)
 print(f"Vocab loaded — {NUM_SPECIALTIES:,} specialties")
