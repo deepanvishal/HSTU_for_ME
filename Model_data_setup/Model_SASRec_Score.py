@@ -11,8 +11,6 @@
 #           sasrec_metrics_{SAMPLE}.png
 #           sasrec_ndcg_{SAMPLE}.png
 # ============================================================
-import os
-import pickle
 import time
 import numpy as np
 import pandas as pd
@@ -54,9 +52,8 @@ NUM_WORKERS = 2
 CHECKPOINT = "/home/jupyter/models/sasrec_1pct_YYYY-MM-DD_HH-MM-SS.pt"
 # To find latest: ls -lt /home/jupyter/models/sasrec_*.pt | head -1
 
-DS              = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
-CACHE_DIR       = f"./cache_test_data_{SAMPLE}"
-TRAIN_CACHE_DIR = f"./cache_train_data_{SAMPLE}"
+DS        = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
+CACHE_DIR = f"./cache_test_data_{SAMPLE}"
 
 RUN_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -193,17 +190,16 @@ display(Markdown(f"**Test records:** {N_test:,} | **Time:** {time.time()-t0:.1f}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 4 — SINGLE FORWARD PASS
-# Computes per-row trigger scores AND aggregate metrics in one pass.
-# Previously this was two separate sections (4 = eval loop, 5 = score loop)
-# with two full GPU inference runs over identical data. Now merged into one.
+# Per-row trigger scores + aggregate metrics in one pass.
+# Labels fetched from numpy BUCKET_ARRAYS — not loaded via DataLoader.
+# Aggregate accumulation reuses per-row GPU tensors — no redundant ops.
+# Constant columns (model/sample/run_timestamp) assigned after DF construction.
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
 display(Markdown("---\n## Section 4 — Score + Evaluate (Single Pass)"))
 print("Section 4 — single forward pass: per-row scores + aggregate metrics...")
 
 
-# Minimal dataset — labels loaded directly from numpy in loop, not via DataLoader
-# No label tensors in __getitem__ — reduces DataLoader memory and transfer overhead
 class ScoreDataset(Dataset):
     def __init__(self, data):
         self.seq     = data["seq_matrix"]
@@ -228,19 +224,16 @@ class ScoreDataset(Dataset):
 # ── Precompute once outside all loops ─────────────────────────────────────────
 SCORE_K = 5
 
-# Discount vectors and cumsums on GPU — vectorized IDCG, no Python loop
 disc_score   = (1.0 / torch.log2(
     torch.arange(2, SCORE_K + 2, dtype=torch.float32)
 )).to(DEVICE)
 disc_cumsums = {k: disc_score[:k].cumsum(0) for k in [1, 3, 5]}
 
-# spec_lookup numpy array — O(1) index vs dict.get()
 max_idx     = max(idx_to_specialty.keys()) + 1
 spec_lookup = np.array(["UNK"] * max_idx, dtype=object)
 for i, sp in idx_to_specialty.items():
     spec_lookup[i] = sp
 
-# Pre-extract arrays — avoid repeated dict key lookup inside inner loop
 member_ids_arr    = test_data["member_ids"]
 trigger_dates_arr = test_data["trigger_dates"]
 trigger_dxs_arr   = test_data["trigger_dxs"]
@@ -251,26 +244,21 @@ BUCKET_ARRAYS     = {
     "T60_180": test_data["lab_t180"],
 }
 
-# Column-wise lists — pd.DataFrame(col_dict) is 3-5x faster than list of dicts
 cols = {
     "member_id": [], "trigger_date": [], "trigger_dx": [], "member_segment": [],
     "time_bucket": [], "true_labels": [], "top5_predictions": [], "top5_scores": [],
     "hit_at_1": [], "hit_at_3": [], "hit_at_5": [],
     "ndcg_at_1": [], "ndcg_at_3": [], "ndcg_at_5": [],
-    "model": [], "sample": [], "run_timestamp": [],
 }
 
-# Separate accumulators for aggregate metrics
-# prec@k and rec@k not stored per-row — accumulated here then derived as means
 metric_sums   = defaultdict(float)
 metric_counts = defaultdict(int)
 
 
-# vec_ndcg — stays on GPU, returns tensor
 def vec_ndcg(k, hits, n_true):
     d    = disc_score[:k]
     dcg  = (hits[:, :k].float() * d).sum(1)
-    ni   = n_true.clamp(min=1, max=k).long() - 1       # 0-based cumsum index
+    ni   = n_true.clamp(min=1, max=k).long() - 1
     idcg = disc_cumsums[k][ni]
     return dcg / idcg.clamp(min=1e-8)                   # [n] on GPU
 
@@ -311,15 +299,14 @@ with torch.no_grad():
             qual_ri  = record_idx + qual_pos
 
             pred_m  = pred[mask].float()
-            lbl_np  = BUCKET_ARRAYS[window][qual_ri]         # numpy [n, C]
+            lbl_np  = BUCKET_ARRAYS[window][qual_ri]
             lbl_m   = torch.from_numpy(lbl_np).to(DEVICE)
-            n_true  = lbl_m.sum(1)                           # [n]
+            n_true  = lbl_m.sum(1)
 
-            # One topk call for all n
             top5_vals, top5_idx = torch.topk(pred_m, SCORE_K, dim=1)
-            hits = lbl_m.gather(1, top5_idx)                 # [n, 5]
+            hits = lbl_m.gather(1, top5_idx)
 
-            # Per-row hit@1/3/5 and ndcg@1/3/5 — for trigger scores BQ table
+            # Per-row metrics — computed once, reused for BQ rows + aggregate
             hit1_t  = (hits[:, :1].sum(1) > 0).float()
             hit3_t  = (hits[:, :3].sum(1) > 0).float()
             hit5_t  = (hits[:, :5].sum(1) > 0).float()
@@ -327,26 +314,35 @@ with torch.no_grad():
             ndcg3_t = vec_ndcg(3, hits, n_true)
             ndcg5_t = vec_ndcg(5, hits, n_true)
 
-            # Accumulate aggregate metrics — prec and rec computed here only
-            for k in K_VALUES:
-                hits_k = hits[:, :k].float()
-                prec_k = hits_k.sum(1) / k
-                rec_k  = hits_k.sum(1) / n_true.clamp(min=1)
-                ndcg_k = vec_ndcg(k, hits, n_true)
-                hit_k  = (hits_k.sum(1) > 0).float()
-                metric_sums[f"{window}_hit@{k}"]  += hit_k.sum().item()
-                metric_sums[f"{window}_prec@{k}"] += prec_k.sum().item()
-                metric_sums[f"{window}_rec@{k}"]  += rec_k.sum().item()
-                metric_sums[f"{window}_ndcg@{k}"] += ndcg_k.sum().item()
-                metric_counts[f"{window}@{k}"]    += n_qual
+            # Aggregate accumulation — reuses above tensors, no redundant computation
+            n1c = n_true.clamp(min=1)
+            hs1 = hits[:, :1].float().sum(1)
+            hs3 = hits[:, :3].float().sum(1)
+            hs5 = hits.float().sum(1)
 
-            # Single GPU→CPU transfer for per-row BQ columns
+            metric_sums[f"{window}_hit@1"]  += hit1_t.sum().item()
+            metric_sums[f"{window}_prec@1"] += hs1.sum().item()
+            metric_sums[f"{window}_rec@1"]  += (hs1 / n1c).sum().item()
+            metric_sums[f"{window}_ndcg@1"] += ndcg1_t.sum().item()
+            metric_counts[f"{window}@1"]    += n_qual
+
+            metric_sums[f"{window}_hit@3"]  += hit3_t.sum().item()
+            metric_sums[f"{window}_prec@3"] += (hs3 / 3).sum().item()
+            metric_sums[f"{window}_rec@3"]  += (hs3 / n1c).sum().item()
+            metric_sums[f"{window}_ndcg@3"] += ndcg3_t.sum().item()
+            metric_counts[f"{window}@3"]    += n_qual
+
+            metric_sums[f"{window}_hit@5"]  += hit5_t.sum().item()
+            metric_sums[f"{window}_prec@5"] += (hs5 / 5).sum().item()
+            metric_sums[f"{window}_rec@5"]  += (hs5 / n1c).sum().item()
+            metric_sums[f"{window}_ndcg@5"] += ndcg5_t.sum().item()
+            metric_counts[f"{window}@5"]    += n_qual
+
+            # Single GPU→CPU transfer per tensor group
             hits_cpu      = torch.stack([hit1_t, hit3_t, hit5_t], dim=1).cpu().numpy()
+            ndcg_cpu      = torch.stack([ndcg1_t, ndcg3_t, ndcg5_t], dim=1).cpu().numpy()
             top5_idx_cpu  = top5_idx.cpu().numpy()
             top5_vals_cpu = top5_vals.cpu().numpy()
-            ndcg1_cpu     = ndcg1_t.cpu().numpy()
-            ndcg3_cpu     = ndcg3_t.cpu().numpy()
-            ndcg5_cpu     = ndcg5_t.cpu().numpy()
 
             # Python loop — string assembly only
             for j, ri in enumerate(qual_ri):
@@ -367,12 +363,9 @@ with torch.no_grad():
                 cols["hit_at_1"].append(float(hits_cpu[j, 0]))
                 cols["hit_at_3"].append(float(hits_cpu[j, 1]))
                 cols["hit_at_5"].append(float(hits_cpu[j, 2]))
-                cols["ndcg_at_1"].append(round(float(ndcg1_cpu[j]), 4))
-                cols["ndcg_at_3"].append(round(float(ndcg3_cpu[j]), 4))
-                cols["ndcg_at_5"].append(round(float(ndcg5_cpu[j]), 4))
-                cols["model"].append("SASRec")
-                cols["sample"].append(SAMPLE)
-                cols["run_timestamp"].append(RUN_TIMESTAMP)
+                cols["ndcg_at_1"].append(round(float(ndcg_cpu[j, 0]), 4))
+                cols["ndcg_at_3"].append(round(float(ndcg_cpu[j, 1]), 4))
+                cols["ndcg_at_5"].append(round(float(ndcg_cpu[j, 2]), 4))
 
         record_idx += bs
 
@@ -380,7 +373,7 @@ with torch.no_grad():
             print(f"  Batch {batch_idx+1}/{len(score_loader)} | "
                   f"Rows so far: {len(cols['member_id']):,}")
 
-# Derive aggregate test_metrics from accumulators
+# Aggregate test_metrics
 test_metrics = {}
 for tag in WINDOWS:
     for k in K_VALUES:
@@ -389,7 +382,6 @@ for tag in WINDOWS:
             key = f"{tag}_{metric}@{k}"
             test_metrics[key] = round(metric_sums[key] / n, 4) if n > 0 else 0.0
 
-# Print aggregate results table
 rows = ["| Window | K | Hit | Precision | Recall | NDCG |", "|---|---|---|---|---|---|"]
 for w in WINDOWS:
     for k in K_VALUES:
@@ -402,9 +394,12 @@ for w in WINDOWS:
         )
 display(Markdown("**TEST RESULTS**\n" + "\n".join(rows)))
 
-# Build scores DataFrame from column lists
+# Build DataFrame — constant columns assigned once outside hot loop
 n_scored  = len(cols["member_id"])
 scores_df = pd.DataFrame(cols)
+scores_df["model"]         = "SASRec"
+scores_df["sample"]        = SAMPLE
+scores_df["run_timestamp"] = RUN_TIMESTAMP
 del cols
 print(f"Single pass done — {n_scored:,} trigger-window pairs scored")
 print(f"Section 4 done — time={time.time()-t0:.1f}s")
@@ -503,78 +498,67 @@ display(Markdown(f"Written to `A870800_gen_rec_model_metrics` | **Time:** {time.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 7 — VISUALIZATION
+# Uses metrics_df already in memory — no BQ roundtrip
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
 display(Markdown("---\n## Section 7 — Visualization"))
 print("Section 7 — plotting...")
 
-plot_df = client.query(f"""
-    SELECT time_bucket, k, hit_at_k, precision_at_k, recall_at_k, ndcg_at_k
-    FROM `{DS}.A870800_gen_rec_model_metrics`
-    WHERE model = 'SASRec'
-      AND sample = '{SAMPLE}'
-      AND run_timestamp = '{RUN_TIMESTAMP}'
-      AND member_segment = 'ALL'
-    ORDER BY time_bucket, k
-""").to_dataframe()
-print(f"Loaded {len(plot_df)} metric rows")
+plot_df = metrics_df.copy()
 
-if plot_df.empty:
-    print("WARNING: No metrics found — check Section 6")
-else:
-    METRICS  = ["hit_at_k", "precision_at_k", "recall_at_k", "ndcg_at_k"]
-    MLABELS  = {"hit_at_k": "Hit@K", "precision_at_k": "Precision@K",
-                "recall_at_k": "Recall@K", "ndcg_at_k": "NDCG@K"}
-    WCOLORS  = {"T0_30": "#5DBE7E", "T30_60": "#F7C948", "T60_180": "#F4845F"}
-    WMARKERS = {"T0_30": "o", "T30_60": "s", "T60_180": "^"}
+METRICS  = ["hit_at_k", "precision_at_k", "recall_at_k", "ndcg_at_k"]
+MLABELS  = {"hit_at_k": "Hit@K", "precision_at_k": "Precision@K",
+            "recall_at_k": "Recall@K", "ndcg_at_k": "NDCG@K"}
+WCOLORS  = {"T0_30": "#5DBE7E", "T30_60": "#F7C948", "T60_180": "#F4845F"}
+WMARKERS = {"T0_30": "o", "T30_60": "s", "T60_180": "^"}
 
-    fig, axes = plt.subplots(2, 2, figsize=(20, 14))
-    axes = axes.flatten()
-    for i, metric in enumerate(METRICS):
-        ax = axes[i]
-        for window in WINDOWS:
-            sub = plot_df[plot_df["time_bucket"] == window].sort_values("k")
-            if sub.empty:
-                continue
-            ax.plot(sub["k"], sub[metric], color=WCOLORS[window],
-                    marker=WMARKERS[window], linewidth=2, markersize=8, label=window)
-            for _, row in sub.iterrows():
-                ax.annotate(f"{row[metric]:.3f}", (row["k"], row[metric]),
-                            textcoords="offset points", xytext=(5, 4),
-                            fontsize=8, color=WCOLORS[window])
-        ax.set_title(MLABELS[metric], fontsize=11, fontweight="bold")
-        ax.set_xlabel("K"); ax.set_ylabel(MLABELS[metric])
-        ax.set_xticks(K_VALUES); ax.legend(fontsize=9)
-        ax.grid(True, linestyle="--", alpha=0.4); ax.set_ylim(0, 1.05)
-    fig.suptitle(f"SASRec — {SAMPLE} | Run: {RUN_TIMESTAMP}",
-                 fontsize=13, fontweight="bold", y=1.01)
-    plt.tight_layout()
-    plt.savefig(f"sasrec_metrics_{SAMPLE}.png", dpi=150, bbox_inches="tight")
-    plt.show()
+fig, axes = plt.subplots(2, 2, figsize=(20, 14))
+axes = axes.flatten()
+for i, metric in enumerate(METRICS):
+    ax = axes[i]
+    for window in WINDOWS:
+        sub = plot_df[plot_df["time_bucket"] == window].sort_values("k")
+        if sub.empty:
+            continue
+        ax.plot(sub["k"], sub[metric], color=WCOLORS[window],
+                marker=WMARKERS[window], linewidth=2, markersize=8, label=window)
+        for _, row in sub.iterrows():
+            ax.annotate(f"{row[metric]:.3f}", (row["k"], row[metric]),
+                        textcoords="offset points", xytext=(5, 4),
+                        fontsize=8, color=WCOLORS[window])
+    ax.set_title(MLABELS[metric], fontsize=11, fontweight="bold")
+    ax.set_xlabel("K"); ax.set_ylabel(MLABELS[metric])
+    ax.set_xticks(K_VALUES); ax.legend(fontsize=9)
+    ax.grid(True, linestyle="--", alpha=0.4); ax.set_ylim(0, 1.05)
+fig.suptitle(f"SASRec — {SAMPLE} | Run: {RUN_TIMESTAMP}",
+             fontsize=13, fontweight="bold", y=1.01)
+plt.tight_layout()
+plt.savefig(f"sasrec_metrics_{SAMPLE}.png", dpi=150, bbox_inches="tight")
+plt.show()
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    pivot = plot_df.pivot_table(
-        index="time_bucket", columns="k", values="ndcg_at_k"
-    ).reindex(WINDOWS)
-    sns.heatmap(pivot, ax=ax, cmap="YlGn", annot=True, fmt=".3f",
-                annot_kws={"size": 12}, linewidths=0.5,
-                cbar_kws={"label": "NDCG@K"})
-    ax.set_title(f"SASRec NDCG — {SAMPLE} | Run: {RUN_TIMESTAMP}",
-                 fontsize=11, fontweight="bold")
-    ax.set_xlabel("K"); ax.set_ylabel("Time Window")
-    plt.tight_layout()
-    plt.savefig(f"sasrec_ndcg_{SAMPLE}.png", dpi=150, bbox_inches="tight")
-    plt.show()
+fig, ax = plt.subplots(figsize=(10, 5))
+pivot = plot_df.pivot_table(
+    index="time_bucket", columns="k", values="ndcg_at_k"
+).reindex(WINDOWS)
+sns.heatmap(pivot, ax=ax, cmap="YlGn", annot=True, fmt=".3f",
+            annot_kws={"size": 12}, linewidths=0.5,
+            cbar_kws={"label": "NDCG@K"})
+ax.set_title(f"SASRec NDCG — {SAMPLE} | Run: {RUN_TIMESTAMP}",
+             fontsize=11, fontweight="bold")
+ax.set_xlabel("K"); ax.set_ylabel("Time Window")
+plt.tight_layout()
+plt.savefig(f"sasrec_ndcg_{SAMPLE}.png", dpi=150, bbox_inches="tight")
+plt.show()
 
-    display(Markdown("### K=3 Summary"))
-    k3 = plot_df[plot_df["k"] == 3][[
-        "time_bucket", "hit_at_k", "precision_at_k", "recall_at_k", "ndcg_at_k"
-    ]].rename(columns={
-        "time_bucket": "Window", "hit_at_k": "Hit@3",
-        "precision_at_k": "Prec@3", "recall_at_k": "Recall@3", "ndcg_at_k": "NDCG@3"
-    }).reset_index(drop=True)
-    display(k3)
-    print(k3.to_string(index=False))
+display(Markdown("### K=3 Summary"))
+k3 = plot_df[plot_df["k"] == 3][[
+    "time_bucket", "hit_at_k", "precision_at_k", "recall_at_k", "ndcg_at_k"
+]].rename(columns={
+    "time_bucket": "Window", "hit_at_k": "Hit@3",
+    "precision_at_k": "Prec@3", "recall_at_k": "Recall@3", "ndcg_at_k": "NDCG@3"
+}).reset_index(drop=True)
+display(k3)
+print(k3.to_string(index=False))
 
 print(f"Section 7 done — time={time.time()-t0:.1f}s")
 display(Markdown(f"**Section 7:** {time.time()-t0:.1f}s"))
