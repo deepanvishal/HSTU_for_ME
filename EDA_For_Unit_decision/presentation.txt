@@ -1,0 +1,17 @@
+Boundary Rules — Slide Bullets
+
+A trigger = first time a member presents with a specific ICD-10 code. One per member per diagnosis, ever.
+Recurrences (same diagnosis reappearing after 12+ months) are excluded — they represent return to an established care relationship, not a new routing decision.
+Left boundary: Member must be enrolled for 12 full months before the trigger date. Ensures a clean lookback window to confirm the diagnosis is genuinely new to the data.
+Right boundary: At least one full follow-up window (T30, T60, or T180) must fit within both the dataset end (Dec 2025) and the member's enrollment end. Partial windows are fully invalid — a trigger either qualifies for a window or does not.
+Members who trigger near the end of the dataset or disenroll shortly after are excluded. No partial credit.
+
+
+Boundary Impact Analysis — Slide Bullets
+
+Qualification is a multi-stage funnel: raw first encounters → left qualified → window qualified → model ready.
+Left boundary (12M enrollment rule) is the primary volume filter — removes triggers from members with insufficient claims history.
+Right boundary losses split between two causes: dataset end truncation and member disenrollment. Both are quantified separately.
+T30 retains the most triggers; T180 loses the most — longer the window, fewer triggers survive both enrollment and dataset constraints.
+Triggers with no claims in the 12 months prior are valid for EDA and Markov but excluded from sequence model training — the model requires a non-empty input sequence.
+Final model-ready population = T180 qualified + has prior claims. This is the most conservative and most reliable subset.
