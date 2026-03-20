@@ -48,14 +48,19 @@ display(Markdown("---\n## Section A — Load Spend by Specialty"))
 
 spend_df = client.query(f"""
     SELECT
-        specialty_ctg_cd                                 AS ending_specialty
-        ,SUM(allowed_amt)                                AS total_allowed_amt
-        ,COUNT(DISTINCT member_id)                       AS member_count
-        ,COUNT(*)                                        AS visit_count
-        ,ROUND(SUM(allowed_amt) / NULLIF(COUNT(*), 0), 2) AS avg_cost_per_visit
+        grouping_code                                    AS ending_specialty
+        ,grouping_desc                                   AS specialty_desc
+        ,SUM(total_allowed_amt)                          AS total_allowed_amt
+        ,SUM(unique_members)                             AS member_count
+        ,SUM(visit_count)                                AS visit_count
+        ,ROUND(SUM(total_allowed_amt) / NULLIF(SUM(visit_count), 0), 2)
+                                                         AS avg_cost_per_visit
     FROM `{DS}.A870800_gen_rec_f_spend_summary`
-    WHERE specialty_ctg_cd IS NOT NULL
-    GROUP BY specialty_ctg_cd
+    WHERE summary_type = 'specialty'
+      AND visit_type IN ('downstream', 'v2')
+      AND grouping_code IS NOT NULL
+      AND grouping_code != ''
+    GROUP BY grouping_code, grouping_desc
     ORDER BY total_allowed_amt DESC
 """).to_dataframe()
 
