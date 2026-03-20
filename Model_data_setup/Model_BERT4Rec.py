@@ -820,7 +820,19 @@ print("Section 7 starting — loading best checkpoint...")
 
 ckpt    = torch.load(CHECKPOINT, weights_only=False)
 cfg     = ckpt["config"]
-t_model = BERT4Rec(**cfg, num_classes=cfg["num_specialties"]).to(DEVICE)
+
+# Extract only constructor arguments — config now contains extra metadata fields
+model_cfg = {
+    "num_specialties": cfg["num_specialties"],
+    "mask_idx":        cfg["mask_idx"],
+    "embedding_dim":   cfg["embedding_dim"],
+    "max_seq_len":     cfg["max_seq_len"],
+    "num_heads":       cfg["num_heads"],
+    "num_blocks":      cfg["num_blocks"],
+    "dropout":         cfg["dropout"],
+    "num_classes":     cfg["num_specialties"],
+}
+t_model = BERT4Rec(**model_cfg).to(DEVICE)
 t_model.load_state_dict(ckpt["model_state"])
 print(f"Checkpoint loaded — epoch {ckpt['epoch']+1}, best NDCG: {ckpt['best_val_ndcg']:.4f}")
 
