@@ -54,7 +54,8 @@ CHECKPOINT = "/home/jupyter/models/sasrec_1pct_YYYY-MM-DD_HH-MM-SS.pt"
 # To find latest: ls -lt /home/jupyter/models/sasrec_*.pt | head -1
 
 DS        = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
-CACHE_DIR = f"./cache_model_data_{SAMPLE}"
+CACHE_DIR       = f"./cache_test_data_{SAMPLE}"
+TRAIN_CACHE_DIR = f"./cache_train_data_{SAMPLE}"
 
 RUN_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
 
