@@ -1,0 +1,22 @@
+﻿Proposed Next Activity
+	Activity Details
+	EDA — Cascade Allowed Amount from Claims
+	Join allowed amount from claims to the in-scope trigger population. Quantify total spend attributable to downstream visits by specialty and time window. Provides cost-weighted signal to prioritize which specialties and diagnosis codes are highest value to predict accurately.
+	Scale Training Data — 5% → 10%+
+	Increase training sample from 5% to 10% or higher. Larger sample reduces variance in transition estimates for low-frequency diagnosis codes and improves generalization for rare specialties.
+	Increase Sequence Depth — 20 → 30
+	Extend maximum input sequence from 20 to 30 prior visits. Members with long histories carry signal beyond 20 visits that is currently truncated. Evaluate whether longer sequences improve NDCG on members with 25+ visit histories vs. those with fewer.
+	SASRec Architecture Improvements
+	Tune number of attention heads, layers, and embedding dimensions. Experiment with time-aware positional encoding — encode days between visits rather than visit rank. Add dropout tuning and learning rate warm-up schedules.
+	BERT4Rec Architecture Improvements
+	Increase mask probability range. Experiment with multi-token masking. Tune MASK_IDX handling and evaluate whether masked inference at multiple positions improves top-5 ranking quality.
+	HSTU Model
+	Implement Hierarchical Sequential Transduction Units — designed specifically for healthcare visit sequences. Evaluate whether HSTU's hierarchical structure better captures multi-level clinical patterns compared to flat attention in SASRec and BERT4Rec.
+	HSTU + Member History
+	EDA to establish whether member-level features (age, gender, enrollment duration, chronic condition flags) carry predictive signal for next specialty beyond clinical sequence alone. No signal confirmed from EDA yet — no model built. Proceed only if EDA demonstrates lift.
+	HSTU + Provider History
+	EDA to establish whether the member's prior provider relationships influence next specialty routing beyond diagnosis sequence. No signal confirmed from EDA yet — no model built. Proceed only if EDA demonstrates lift.
+	SASRec / BERT4Rec / HSTU + Reinforcement Learning
+	Augment sequence models with a reinforcement learning layer that optimizes for long-horizon outcomes — care pathway completion rather than next-window accuracy. Requires defining a reward signal tied to clinical or network outcomes.
+	RL — Provider-Level Prediction (Sample Run)
+	Descoped from current phase. Will attempt on a 1,000 member sample to assess feasibility. Provider-level prediction introduces sparse labels, provider turnover, and cold-start challenges not present in specialty-level modeling.
