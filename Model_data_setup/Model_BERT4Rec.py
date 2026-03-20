@@ -55,7 +55,7 @@ NUM_WORKERS   = 2
 
 RUN_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
 
-CACHE_DIR  = f"./cache_model_data_{SAMPLE}"
+CACHE_DIR  = f"./cache_train_data_{SAMPLE}"
 MODEL_DIR  = "/home/jupyter/models"
 CHECKPOINT = f"{MODEL_DIR}/bert4rec_{SAMPLE}_{RUN_TIMESTAMP}.pt"
 VOCAB_PATH = f"{MODEL_DIR}/bert4rec_{SAMPLE}_{RUN_TIMESTAMP}_vocab.pkl"
