@@ -84,8 +84,8 @@ display(Markdown("---\n## Section 1 — Load Cache"))
 with open(f"{CACHE_DIR}/provider_vocab.pkl",  "rb") as f: provider_vocab  = pickle.load(f)
 with open(f"{CACHE_DIR}/specialty_vocab.pkl", "rb") as f: specialty_vocab = pickle.load(f)
 with open(f"{CACHE_DIR}/dx_vocab.pkl",        "rb") as f: dx_vocab        = pickle.load(f)
-with open(f"{CACHE_DIR}/train_hard_neg_candidates.pkl", "rb") as f:
-    hard_neg_candidates = pickle.load(f)
+with open(f"{CACHE_DIR}/from_provider_to_cands.pkl", "rb") as f:
+    from_provider_to_cands = pickle.load(f)
 
 PROVIDER_VOCAB_SIZE = len(provider_vocab)
 SPEC_VOCAB_SIZE     = len(specialty_vocab)
@@ -94,7 +94,8 @@ DX_VOCAB_SIZE       = len(dx_vocab)
 keys = ["seq_matrix", "delta_t_matrix", "trigger_token", "seq_lengths",
         "lab_t30", "lab_t60", "lab_t180",
         "is_t30", "is_t60", "is_t180",
-        "member_ids", "trigger_dates", "trigger_dxs", "segments"]
+        "member_ids", "trigger_dates", "trigger_dxs", "segments",
+        "from_provider_ids"]
 
 train_data = {k: np.load(f"{CACHE_DIR}/train_{k}.npy", allow_pickle=True) for k in keys}
 val_data   = {k: np.load(f"{CACHE_DIR}/val_{k}.npy",   allow_pickle=True) for k in keys}
@@ -128,41 +129,41 @@ def sparse_to_multihot(label_list, vocab_size):
 
 
 class ProviderDataset(Dataset):
-    def __init__(self, data, hard_negs=None):
-        self.seq_matrix    = data["seq_matrix"]          # (N, 20, 2)
-        self.trigger_token = data["trigger_token"]        # (N, 1)
-        self.seq_lengths   = data["seq_lengths"]
-        self.lab_t30       = data["lab_t30"]              # ragged
-        self.lab_t60       = data["lab_t60"]
-        self.lab_t180      = data["lab_t180"]
-        self.is_t30        = data["is_t30"]
-        self.is_t60        = data["is_t60"]
-        self.is_t180       = data["is_t180"]
-        self.hard_negs     = hard_negs                    # dict or None
+    def __init__(self, data):
+        self.seq_matrix       = data["seq_matrix"]       # (N, 20, 2)
+        self.trigger_token    = data["trigger_token"]     # (N, 1)
+        self.seq_lengths      = data["seq_lengths"]
+        self.lab_t30          = data["lab_t30"]           # ragged
+        self.lab_t60          = data["lab_t60"]
+        self.lab_t180         = data["lab_t180"]
+        self.is_t30           = data["is_t30"]
+        self.is_t60           = data["is_t60"]
+        self.is_t180          = data["is_t180"]
+        self.from_provider_ids = data["from_provider_ids"] # (N,) int32
 
     def __len__(self):
         return len(self.seq_lengths)
 
     def __getitem__(self, idx):
-        hard_neg = self.hard_negs[idx] if (self.hard_negs and idx in self.hard_negs) else np.array([], dtype=np.int32)
         return {
-            "seq":          torch.from_numpy(self.seq_matrix[idx].copy()),    # (20, 2)
-            "trigger":      torch.from_numpy(self.trigger_token[idx].copy()), # (1,)
-            "seq_len":      torch.tensor(int(self.seq_lengths[idx]), dtype=torch.long),
-            "lab_t30":      self.lab_t30[idx],   # kept as list for collate_fn
-            "lab_t60":      self.lab_t60[idx],
-            "lab_t180":     self.lab_t180[idx],
-            "is_t30":       torch.tensor(bool(self.is_t30[idx]),  dtype=torch.bool),
-            "is_t60":       torch.tensor(bool(self.is_t60[idx]),  dtype=torch.bool),
-            "is_t180":      torch.tensor(bool(self.is_t180[idx]), dtype=torch.bool),
-            "hard_neg":     hard_neg,
+            "seq":             torch.from_numpy(self.seq_matrix[idx].copy()),
+            "trigger":         torch.from_numpy(self.trigger_token[idx].copy()),
+            "seq_len":         torch.tensor(int(self.seq_lengths[idx]), dtype=torch.long),
+            "lab_t30":         self.lab_t30[idx],
+            "lab_t60":         self.lab_t60[idx],
+            "lab_t180":        self.lab_t180[idx],
+            "is_t30":          torch.tensor(bool(self.is_t30[idx]),  dtype=torch.bool),
+            "is_t60":          torch.tensor(bool(self.is_t60[idx]),  dtype=torch.bool),
+            "is_t180":         torch.tensor(bool(self.is_t180[idx]), dtype=torch.bool),
+            "from_provider_id": int(self.from_provider_ids[idx]),  # int — for collate lookup
         }
 
 
-def collate_fn(batch, vocab_size):
+def collate_fn(batch, vocab_size, from_provider_to_cands):
     """
-    Collate batch — builds multi-hot labels on-the-fly from sparse lists.
-    Dense multi-hot at 31K × N would be too large to store; we build per batch.
+    Collate batch:
+    - builds multi-hot labels on-the-fly from sparse lists
+    - computes hard negatives per sample (exclusion of positives)
     """
     seq          = torch.stack([b["seq"]     for b in batch])          # (B, 20, 2)
     trigger      = torch.stack([b["trigger"] for b in batch])          # (B, 1)
@@ -176,8 +177,23 @@ def collate_fn(batch, vocab_size):
     lab_t60  = torch.stack([sparse_to_multihot(b["lab_t60"],  vocab_size) for b in batch])
     lab_t180 = torch.stack([sparse_to_multihot(b["lab_t180"], vocab_size) for b in batch])
 
-    # Hard neg: list of arrays (variable length) — kept as list
-    hard_negs = [b["hard_neg"] for b in batch]
+    # Hard neg exclusion here — batch of 512, not 5M triggers
+    # For each sample: get candidates for its from_provider, exclude positives
+    _empty = np.array([], dtype=np.int32)
+    hard_negs = []
+    for b in batch:
+        fp_int = b["from_provider_id"]
+        cands  = from_provider_to_cands.get(fp_int, _empty)
+        if len(cands) == 0:
+            hard_negs.append(_empty)
+            continue
+        # Exclude positives — combine all windows
+        all_pos = set(b["lab_t30"]) | set(b["lab_t60"]) | set(b["lab_t180"])
+        if all_pos:
+            mask  = ~np.isin(cands, list(all_pos))
+            hard_negs.append(cands[mask])
+        else:
+            hard_negs.append(cands)
 
     return {
         "seq": seq, "trigger": trigger, "seq_len": seq_len,
@@ -195,19 +211,23 @@ _loader_kwargs = dict(
     persistent_workers=True,
 )
 
-train_dataset = ProviderDataset(train_data, hard_negs=hard_neg_candidates)
-val_dataset   = ProviderDataset(val_data,   hard_negs=None)
+train_dataset = ProviderDataset(train_data)
+val_dataset   = ProviderDataset(val_data)
+
+_empty_cands = {}   # val has no hard negs — pass empty dict
 
 train_loader = DataLoader(
     train_dataset,
     batch_size=BATCH_SIZE, shuffle=True,
-    collate_fn=partial(collate_fn, vocab_size=PROVIDER_VOCAB_SIZE),
+    collate_fn=partial(collate_fn, vocab_size=PROVIDER_VOCAB_SIZE,
+                       from_provider_to_cands=from_provider_to_cands),
     **_loader_kwargs,
 )
 val_loader = DataLoader(
     val_dataset,
     batch_size=BATCH_SIZE * 2, shuffle=False,
-    collate_fn=partial(collate_fn, vocab_size=PROVIDER_VOCAB_SIZE),
+    collate_fn=partial(collate_fn, vocab_size=PROVIDER_VOCAB_SIZE,
+                       from_provider_to_cands=_empty_cands),
     **_loader_kwargs,
 )
 
