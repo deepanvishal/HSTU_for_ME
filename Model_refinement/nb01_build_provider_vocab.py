@@ -235,3 +235,27 @@ display(Markdown(f"""
 Next: run NB_02 to build train dataset.
 """))
 print("NB_01 complete")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLEANUP — Free memory after notebook completes
+# ══════════════════════════════════════════════════════════════════════════════
+import gc
+import torch
+
+# Delete all large dataframes and arrays still in scope
+for var in ["seq_df", "label_df", "hn_df", "prov_df", "spec_df", "dx_df",
+            "prov_spec_df", "seq_df2", "trans_df", "grouped_trans",
+            "seq_matrix", "delta_t_mat", "lab_t30", "lab_t60", "lab_t180",
+            "train_data", "val_data", "test_data",
+            "from_to_by_specialty", "from_provider_to_cands",
+            "hard_neg_candidates", "all_arrays"]:
+    if var in dir():
+        del globals()[var]
+
+gc.collect()
+
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    print(f"GPU memory freed — allocated: {torch.cuda.memory_allocated()/1e9:.2f}GB")
+
+print("Memory cleanup done")
