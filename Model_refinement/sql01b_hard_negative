@@ -1,0 +1,80 @@
+-- ============================================================
+-- SQL_01b — PROVIDER SUPPORT TABLES
+-- Purpose : Pre-compute tables needed by NB_02 hard neg mining
+--           and NB_01 provider_specialty_map
+--           Run once — no sample dependency
+-- New tables:
+--   A870800_gen_rec_provider_primary_specialty
+--     One row per provider — most common specialty
+--     Replaces NB_01 Section 4 BQ query
+--     Used by: NB_01 (provider_specialty_map.pkl)
+--              A870800_gen_rec_provider_hardneg_lookup (below)
+--
+--   A870800_gen_rec_provider_hardneg_lookup
+--     One row per (from_provider, to_specialty)
+--     Pre-aggregated ARRAY of top80 to_provider candidates
+--     Used by: NB_02 Section 3 — replaces 41M row Python groupby
+-- ============================================================
+
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- TABLE 1 — PRIMARY SPECIALTY PER PROVIDER
+-- Most common specialty_ctg_cd per srv_prvdr_id across all visits
+-- ══════════════════════════════════════════════════════════════════════════════
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_primary_specialty`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+WITH specialty_counts AS (
+    SELECT
+        srv_prvdr_id
+        ,specialty_ctg_cd
+        ,COUNT(*)                                        AS visit_count
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits`
+    WHERE srv_prvdr_id     IS NOT NULL
+      AND specialty_ctg_cd IS NOT NULL
+      AND specialty_ctg_cd != ''
+    GROUP BY srv_prvdr_id, specialty_ctg_cd
+)
+SELECT
+    srv_prvdr_id
+    ,specialty_ctg_cd                                    AS primary_specialty
+    ,visit_count
+FROM specialty_counts
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY srv_prvdr_id
+    ORDER BY visit_count DESC
+) = 1
+;
+
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- TABLE 2 — HARD NEGATIVE LOOKUP
+-- Pre-aggregated: for each from_provider × to_specialty,
+-- what are the top80 provider candidates?
+-- Python NB_02 just loads this table — no 41M row groupby needed
+--
+-- Grain: one row per (from_provider, to_specialty)
+-- to_providers: ARRAY of top80 providers in that specialty
+--               that from_provider has transitioned to
+-- ══════════════════════════════════════════════════════════════════════════════
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_hardneg_lookup`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+SELECT
+    t.from_provider
+    ,ps.primary_specialty                                AS to_specialty
+    ,ARRAY_AGG(DISTINCT t.to_provider
+        ORDER BY t.to_provider)                          AS to_provider_candidates
+    ,COUNT(DISTINCT t.to_provider)                       AS n_candidates
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_transitions` t
+JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_vocab` pv
+    ON  t.to_provider = pv.srv_prvdr_id
+    AND pv.is_top80   = TRUE
+JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_primary_specialty` ps
+    ON  t.to_provider = ps.srv_prvdr_id
+WHERE t.from_provider IS NOT NULL
+  AND t.to_provider   IS NOT NULL
+GROUP BY
+    t.from_provider
+    ,ps.primary_specialty
+;
