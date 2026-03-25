@@ -616,3 +616,156 @@ GROUP BY
     ,fp.from_provider
     ,v.srv_prvdr_id
 ;
+
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- AGGREGATED TRAIN/TEST TABLES — ONE ROW PER TRIGGER
+-- Purpose : Pre-aggregate labels per trigger per window using ARRAY_AGG
+--           Python NB_02/03 pulls these — no Python-side groupby needed
+--           BQ does all heavy lifting — Python is a thin consumer
+-- ══════════════════════════════════════════════════════════════════════════════
+
+-- ── AGGREGATED TRAIN 1PCT ─────────────────────────────────────────────────────
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_train_agg_1pct`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+SELECT
+    member_id
+    ,trigger_date
+    ,trigger_dx
+    ,trigger_dx_clean
+    ,trigger_specialty
+    ,from_provider
+    ,member_segment
+    ,age_nbr
+    ,gender_cd
+    ,is_t30_qualified
+    ,is_t60_qualified
+    ,is_t180_qualified
+    ,ARRAY_AGG(DISTINCT CASE
+        WHEN time_bucket = 'T0_30' AND label_provider IS NOT NULL
+        THEN label_provider END IGNORE NULLS)            AS lab_t30
+    ,ARRAY_AGG(DISTINCT CASE
+        WHEN time_bucket = 'T30_60' AND label_provider IS NOT NULL
+        THEN label_provider END IGNORE NULLS)            AS lab_t60
+    ,ARRAY_AGG(DISTINCT CASE
+        WHEN time_bucket = 'T60_180' AND label_provider IS NOT NULL
+        THEN label_provider END IGNORE NULLS)            AS lab_t180
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_train_1pct`
+GROUP BY
+    member_id, trigger_date, trigger_dx, trigger_dx_clean,
+    trigger_specialty, from_provider, member_segment,
+    age_nbr, gender_cd,
+    is_t30_qualified, is_t60_qualified, is_t180_qualified
+;
+
+
+-- ── AGGREGATED TEST 1PCT ──────────────────────────────────────────────────────
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_test_agg_1pct`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+SELECT
+    member_id
+    ,trigger_date
+    ,trigger_dx
+    ,trigger_dx_clean
+    ,trigger_specialty
+    ,from_provider
+    ,member_segment
+    ,age_nbr
+    ,gender_cd
+    ,is_t30_qualified
+    ,is_t60_qualified
+    ,is_t180_qualified
+    ,ARRAY_AGG(DISTINCT CASE
+        WHEN time_bucket = 'T0_30' AND label_provider IS NOT NULL
+        THEN label_provider END IGNORE NULLS)            AS lab_t30
+    ,ARRAY_AGG(DISTINCT CASE
+        WHEN time_bucket = 'T30_60' AND label_provider IS NOT NULL
+        THEN label_provider END IGNORE NULLS)            AS lab_t60
+    ,ARRAY_AGG(DISTINCT CASE
+        WHEN time_bucket = 'T60_180' AND label_provider IS NOT NULL
+        THEN label_provider END IGNORE NULLS)            AS lab_t180
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_test_1pct`
+GROUP BY
+    member_id, trigger_date, trigger_dx, trigger_dx_clean,
+    trigger_specialty, from_provider, member_segment,
+    age_nbr, gender_cd,
+    is_t30_qualified, is_t60_qualified, is_t180_qualified
+;
+
+
+-- ── AGGREGATED TRAIN 5PCT ─────────────────────────────────────────────────────
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_train_agg_5pct`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+SELECT
+    member_id, trigger_date, trigger_dx, trigger_dx_clean,
+    trigger_specialty, from_provider, member_segment,
+    age_nbr, gender_cd,
+    is_t30_qualified, is_t60_qualified, is_t180_qualified
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T0_30'   AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t30
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T30_60'  AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t60
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T60_180' AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t180
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_train_5pct`
+GROUP BY member_id, trigger_date, trigger_dx, trigger_dx_clean,
+    trigger_specialty, from_provider, member_segment, age_nbr, gender_cd,
+    is_t30_qualified, is_t60_qualified, is_t180_qualified
+;
+
+
+-- ── AGGREGATED TEST 5PCT ──────────────────────────────────────────────────────
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_test_agg_5pct`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+SELECT
+    member_id, trigger_date, trigger_dx, trigger_dx_clean,
+    trigger_specialty, from_provider, member_segment,
+    age_nbr, gender_cd,
+    is_t30_qualified, is_t60_qualified, is_t180_qualified
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T0_30'   AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t30
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T30_60'  AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t60
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T60_180' AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t180
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_test_5pct`
+GROUP BY member_id, trigger_date, trigger_dx, trigger_dx_clean,
+    trigger_specialty, from_provider, member_segment, age_nbr, gender_cd,
+    is_t30_qualified, is_t60_qualified, is_t180_qualified
+;
+
+
+-- ── AGGREGATED TRAIN 10PCT ────────────────────────────────────────────────────
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_train_agg_10pct`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+SELECT
+    member_id, trigger_date, trigger_dx, trigger_dx_clean,
+    trigger_specialty, from_provider, member_segment,
+    age_nbr, gender_cd,
+    is_t30_qualified, is_t60_qualified, is_t180_qualified
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T0_30'   AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t30
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T30_60'  AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t60
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T60_180' AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t180
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_train_10pct`
+GROUP BY member_id, trigger_date, trigger_dx, trigger_dx_clean,
+    trigger_specialty, from_provider, member_segment, age_nbr, gender_cd,
+    is_t30_qualified, is_t60_qualified, is_t180_qualified
+;
+
+
+-- ── AGGREGATED TEST 10PCT ─────────────────────────────────────────────────────
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_test_agg_10pct`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+SELECT
+    member_id, trigger_date, trigger_dx, trigger_dx_clean,
+    trigger_specialty, from_provider, member_segment,
+    age_nbr, gender_cd,
+    is_t30_qualified, is_t60_qualified, is_t180_qualified
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T0_30'   AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t30
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T30_60'  AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t60
+    ,ARRAY_AGG(DISTINCT CASE WHEN time_bucket='T60_180' AND label_provider IS NOT NULL THEN label_provider END IGNORE NULLS) AS lab_t180
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_test_10pct`
+GROUP BY member_id, trigger_date, trigger_dx, trigger_dx_clean,
+    trigger_specialty, from_provider, member_segment, age_nbr, gender_cd,
+    is_t30_qualified, is_t60_qualified, is_t180_qualified
+;
