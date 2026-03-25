@@ -423,73 +423,96 @@ display(Markdown(f"**Parameters:** {n_params:,} | **Time:** {time.time()-t0:.1f}
 # SECTION 4 — LOSS (InfoNCE)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def infonce_loss(user_repr, pos_ids, neg_ids, model_raw, temperature=0.07):
-    """
-    InfoNCE loss over positives and negatives.
-
-    user_repr: (B, d)
-    pos_ids:   list of tensors, one per sample — positive provider int_ids
-    neg_ids:   (B, K) — random + hard negative int_ids
-
-    For each sample: loss = -log(exp(u·p/τ) / sum(exp(u·n/τ) for all n))
-    """
-    loss_total = torch.tensor(0.0, device=user_repr.device)
-    n_valid    = 0
-
-    for i in range(len(user_repr)):
-        u   = user_repr[i]                      # (d,)
-        pos = pos_ids[i]                        # variable length
-        if len(pos) == 0:
-            continue
-
-        pos_t = torch.tensor(pos, dtype=torch.long, device=u.device)
-        neg_t = neg_ids[i]                      # (K,)
-
-        # Scores for positives and negatives
-        pos_emb = model_raw.provider_emb(pos_t)  # (|pos|, d)
-        neg_emb = model_raw.provider_emb(neg_t)  # (K, d)
-
-        pos_scores = (u @ pos_emb.T) / temperature   # (|pos|,)
-        neg_scores = (u @ neg_emb.T) / temperature   # (K,)
-
-        # Per-positive loss: -pos_score + log(sum_exp(all scores))
-        all_scores = torch.cat([pos_scores, neg_scores])
-        log_sum    = torch.logsumexp(all_scores, dim=0)
-        loss_i     = (-pos_scores + log_sum).mean()
-
-        loss_total = loss_total + loss_i
-        n_valid   += 1
-
-    return loss_total / max(n_valid, 1)
-
-
-def sample_negatives(batch_size, hard_negs_list, provider_vocab_size,
+def build_neg_matrix(batch_size, hard_negs_list, provider_vocab_size,
                      neg_k, hard_neg_k, device):
     """
-    For each sample: neg_k random + up to hard_neg_k hard negatives.
-    Returns list of tensors, one per sample.
+    Build (B, K_total) negative id matrix in one shot.
+    K_total = neg_k + hard_neg_k
+    Random negatives: sampled uniformly — one call for the whole batch
+    Hard negatives:   padded to hard_neg_k with random fallback
+    Returns: (B, neg_k + hard_neg_k) int64 tensor
     """
-    neg_ids = []
-    for i in range(batch_size):
-        # Random negatives — uniform over [2, vocab_size)
-        rand_neg = torch.randint(2, provider_vocab_size,
-                                 (neg_k,), device=device)
+    # Random negatives — one call for entire batch (B, neg_k)
+    rand_negs = torch.randint(2, provider_vocab_size,
+                              (batch_size, neg_k), device=device)
 
-        # Hard negatives
-        hn = hard_negs_list[i]
-        if len(hn) > 0:
-            # Cap at hard_neg_k, sample without replacement if enough
-            if len(hn) > hard_neg_k:
-                idx = torch.randperm(len(hn))[:hard_neg_k]
-                hn  = torch.tensor(hn[idx], dtype=torch.long, device=device)
-            else:
-                hn  = torch.tensor(hn, dtype=torch.long, device=device)
-            neg = torch.cat([rand_neg, hn])
+    if hard_neg_k == 0:
+        return rand_negs
+
+    # Hard negatives — pad each sample to hard_neg_k
+    # Use random fallback for samples with fewer than hard_neg_k hard negs
+    hard_mat = torch.randint(2, provider_vocab_size,
+                             (batch_size, hard_neg_k), device=device)
+    for i, hn in enumerate(hard_negs_list):
+        if len(hn) == 0:
+            continue
+        n = min(len(hn), hard_neg_k)
+        # Sample without replacement if enough candidates
+        if len(hn) > hard_neg_k:
+            idx = torch.randperm(len(hn), device='cpu')[:hard_neg_k]
+            hn_t = torch.tensor(hn[idx.numpy()], dtype=torch.long, device=device)
         else:
-            neg = rand_neg
+            hn_t = torch.tensor(hn[:n], dtype=torch.long, device=device)
+        hard_mat[i, :len(hn_t)] = hn_t
 
-        neg_ids.append(neg)
-    return neg_ids
+    return torch.cat([rand_negs, hard_mat], dim=1)   # (B, neg_k + hard_neg_k)
+
+
+def batched_infonce_loss(user_repr, labels_multihot, neg_matrix,
+                         model_raw, temperature=0.07):
+    """
+    Fully batched InfoNCE — zero Python loops over batch.
+
+    user_repr:       (B, d)
+    labels_multihot: (B, V) — 1 where positive provider
+    neg_matrix:      (B, K) — negative provider int_ids
+
+    Steps:
+    1. One embedding lookup for all negatives: (B, K, d)
+    2. In-batch negatives: other samples' user_repr as negatives — free
+    3. Batched matmul for all scores
+    4. Per-positive logsumexp loss — vectorized
+    """
+    B, d = user_repr.shape
+    K    = neg_matrix.shape[1]
+    device = user_repr.device
+
+    # ── Negative scores — one batched embedding lookup ────────────────────────
+    # neg_matrix: (B, K) → neg_emb: (B, K, d)
+    neg_emb    = model_raw.provider_emb(neg_matrix)            # (B, K, d)
+    neg_scores = torch.bmm(user_repr.unsqueeze(1),
+                           neg_emb.transpose(1, 2)             # (B, d, K)
+                           ).squeeze(1) / temperature           # (B, K)
+
+    # ── In-batch negatives — free, just use other rows' user_repr ─────────────
+    # user_repr: (B, d) — each row is a negative for all other rows
+    # ib_scores[i, j] = user_repr[i] · user_repr[j] / τ  (j ≠ i diagonal masked)
+    ib_scores = (user_repr @ user_repr.T) / temperature         # (B, B)
+    # Mask self-similarity (diagonal) with -inf
+    ib_scores.fill_diagonal_(float('-inf'))
+
+    # ── All negative logits: explicit negs + in-batch ────────────────────────
+    all_neg_scores = torch.cat([neg_scores, ib_scores], dim=1)  # (B, K+B)
+
+    # ── Positive scores — lookup only positive provider embeddings ────────────
+    # labels_multihot: (B, V) — sparse, few 1s per row
+    # Get all positive indices across batch in one lookup
+    pos_rows, pos_cols = labels_multihot.nonzero(as_tuple=True)  # both (n_pos,)
+
+    if len(pos_rows) == 0:
+        return torch.tensor(0.0, device=device)
+
+    pos_emb    = model_raw.provider_emb(pos_cols)                # (n_pos, d)
+    # Score each positive against its corresponding user repr
+    pos_scores = (user_repr[pos_rows] * pos_emb).sum(dim=1) / temperature  # (n_pos,)
+
+    # ── InfoNCE per positive ──────────────────────────────────────────────────
+    # For each positive (i, p): loss = -score(i,p) + log(sum_exp(neg_scores[i]))
+    # log_sum_neg is the same for all positives of the same sample i
+    log_sum_neg = torch.logsumexp(all_neg_scores, dim=1)         # (B,)
+    loss_per_pos = -pos_scores + log_sum_neg[pos_rows]           # (n_pos,)
+
+    return loss_per_pos.mean()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -664,33 +687,23 @@ for epoch in range(EPOCHS):
         with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
             user_repr = model_raw.encode(seq, trigger, seq_len)     # (B, d)
 
-            # Sample negatives
-            neg_ids = sample_negatives(B, hard_negs_list,
-                                       PROVIDER_VOCAB_SIZE,
-                                       NEG_K, HARD_NEG_K, DEVICE)
+            # Build neg matrix — one call for whole batch (B, K)
+            neg_matrix = build_neg_matrix(B, hard_negs_list,
+                                          PROVIDER_VOCAB_SIZE,
+                                          NEG_K, HARD_NEG_K, DEVICE)
 
-            # Compute InfoNCE per active window
-            loss = torch.tensor(0.0, device=DEVICE)
+            # Batched InfoNCE per active window — zero Python loops
+            loss      = torch.tensor(0.0, device=DEVICE)
             n_windows = 0
 
             for flag, labs in [(is_t30, lab_t30), (is_t60, lab_t60), (is_t180, lab_t180)]:
                 if flag.sum() == 0:
                     continue
-                # Get positive provider ids per sample from multi-hot labels
-                # labs: (B, V) — 1 where positive
-                u_m   = user_repr[flag]
-                l_m   = labs[flag]                              # (B_m, V)
-                n_m   = flag.sum().item()
+                u_m   = user_repr[flag]           # (B_m, d)
+                l_m   = labs[flag]                # (B_m, V) — multi-hot
+                neg_m = neg_matrix[flag]          # (B_m, K)
 
-                # Extract positive ids per sample
-                pos_ids_batch = []
-                for j in range(n_m):
-                    pos = l_m[j].nonzero(as_tuple=True)[0].cpu().numpy()
-                    pos_ids_batch.append(pos)
-
-                neg_ids_m = [neg_ids[k] for k, v in enumerate(flag.tolist()) if v]
-
-                window_loss = infonce_loss(u_m, pos_ids_batch, neg_ids_m, model_raw)
+                window_loss = batched_infonce_loss(u_m, l_m, neg_m, model_raw)
                 loss        = loss + window_loss
                 n_windows  += 1
 
@@ -773,3 +786,27 @@ display(Markdown(f"""
 Next: run NB_07 to score on test set.
 """))
 print("NB_04 complete")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLEANUP — Free memory after notebook completes
+# ══════════════════════════════════════════════════════════════════════════════
+import gc
+import torch
+
+# Delete all large dataframes and arrays still in scope
+for var in ["seq_df", "label_df", "hn_df", "prov_df", "spec_df", "dx_df",
+            "prov_spec_df", "seq_df2", "trans_df", "grouped_trans",
+            "seq_matrix", "delta_t_mat", "lab_t30", "lab_t60", "lab_t180",
+            "train_data", "val_data", "test_data",
+            "from_to_by_specialty", "from_provider_to_cands",
+            "hard_neg_candidates", "all_arrays"]:
+    if var in dir():
+        del globals()[var]
+
+gc.collect()
+
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    print(f"GPU memory freed — allocated: {torch.cuda.memory_allocated()/1e9:.2f}GB")
+
+print("Memory cleanup done")
