@@ -272,11 +272,12 @@ if os.path.exists(TRAIN_CACHE):
     keys = ["seq_matrix", "delta_t_matrix", "trigger_token", "seq_lengths",
             "lab_t30", "lab_t60", "lab_t180",
             "is_t30", "is_t60", "is_t180",
-            "member_ids", "trigger_dates", "trigger_dxs", "segments"]
+            "member_ids", "trigger_dates", "trigger_dxs", "segments",
+            "from_provider_ids"]
     train_data = {k: np.load(f"{CACHE_DIR}/train_{k}.npy", allow_pickle=True) for k in keys}
     val_data   = {k: np.load(f"{CACHE_DIR}/val_{k}.npy",   allow_pickle=True) for k in keys}
-    with open(f"{CACHE_DIR}/train_hard_neg_candidates.pkl", "rb") as f:
-        hard_neg_candidates = pickle.load(f)
+    with open(f"{CACHE_DIR}/from_provider_to_cands.pkl", "rb") as f:
+        from_provider_to_cands = pickle.load(f)
     print(f"Loaded train={train_data['seq_matrix'].shape[0]:,} | val={val_data['seq_matrix'].shape[0]:,}")
 else:
     # label_df is already sorted by trigger_date (from BQ ORDER BY)
@@ -341,36 +342,36 @@ else:
     del seq_df2, trig_idx, seq_pos, prov_ids, spec_ids, dt_vals
     gc.collect()
 
-    # ── 4d: Hard neg candidates ────────────────────────────────────────────────
-    # Per-trigger loop — unavoidable (depends on per-trigger positives)
-    # But much smaller than before: only triggers WITH a from_provider in lookup
-    print("4d: Building hard neg candidates (minimal loop)...")
+    # ── 4d: Hard neg lookup — NO per-trigger loop ────────────────────────────
+    # Exclusion of positives moves to collate_fn at training time
+    # Here we only store:
+    #   from_provider_ids: (N,) int32 — from_provider int_id per trigger
+    #   from_provider_to_cands.pkl — {from_provider_int_id -> candidate_int_ids}
+    # collate_fn does: cands[~np.isin(cands, positives)] per batch of 512
+    print("4d: Building from_provider lookup (no per-trigger loop)...")
     t1 = time.time()
 
+    # Encode from_provider string → int_id
+    # Use provider_vocab for known providers, -1 for unknown
     from_prov_arr = label_df["from_provider"].values
-    hard_neg_candidates = {}
+    from_provider_ids = np.array(
+        [provider_vocab.get(p, -1) for p in from_prov_arr],
+        dtype=np.int32
+    )
 
-    for i in range(N):
-        from_prov = from_prov_arr[i]
-        if from_prov not in from_to_by_specialty:
+    # Build {from_provider_int_id -> np.array of all candidate int_ids}
+    # One entry per unique from_provider — few thousand entries total
+    # Merge all specialties for this from_provider into one array
+    from_provider_to_cands = {}
+    for from_prov_str, spec_dict in from_to_by_specialty.items():
+        fp_int = provider_vocab.get(from_prov_str, -1)
+        if fp_int < 0:
             continue
-        all_pos = set(lab_t30[i]) | set(lab_t60[i]) | set(lab_t180[i])
-        if not all_pos:
-            continue
-        hard_negs = []
-        for spec, cands in from_to_by_specialty[from_prov].items():
-            mask = ~np.isin(cands, list(all_pos))
-            if mask.any():
-                hard_negs.append(cands[mask])
-        if hard_negs:
-            combined = np.unique(np.concatenate(hard_negs))
-            if len(combined) > 0:
-                hard_neg_candidates[i] = combined
+        all_cands = np.unique(np.concatenate(list(spec_dict.values())))
+        from_provider_to_cands[fp_int] = all_cands
 
-        if (i + 1) % 1_000_000 == 0:
-            print(f"  Hard neg progress: {i+1:,}/{N:,}")
-
-    print(f"  Hard negs: {len(hard_neg_candidates):,} triggers | {time.time()-t1:.1f}s")
+    print(f"  from_provider_to_cands: {len(from_provider_to_cands):,} entries | {time.time()-t1:.1f}s")
+    print(f"  Positive exclusion deferred to collate_fn — 0s here ✓")
 
     del seq_df, label_df, from_to_by_specialty
     gc.collect()
@@ -420,7 +421,7 @@ else:
     print(f"Train: {trigger_dates_arr[0]} → {trigger_dates_arr[n_train-1]}")
     print(f"Val:   {trigger_dates_arr[n_train]} → {trigger_dates_arr[-1]}")
 
-    train_hard_neg = {k: v for k, v in hard_neg_candidates.items() if k < n_train}
+    train_hard_neg = None   # exclusion done in collate_fn — not stored per trigger
 
     all_arrays = dict(
         seq_matrix=seq_matrix, delta_t_matrix=delta_t_mat,
@@ -429,6 +430,7 @@ else:
         is_t30=is_t30_arr, is_t60=is_t60_arr, is_t180=is_t180_arr,
         member_ids=member_ids_arr, trigger_dates=trigger_dates_arr,
         trigger_dxs=trigger_dxs_arr, segments=segments_arr,
+        from_provider_ids=from_provider_ids,
     )
 
     train_data = {}; val_data = {}
@@ -440,9 +442,12 @@ else:
         np.save(f"{CACHE_DIR}/val_{k}.npy",   val_data[k])
         print(f"  {k}: train={train_data[k].shape} val={val_data[k].shape}")
 
-    with open(f"{CACHE_DIR}/train_hard_neg_candidates.pkl", "wb") as f:
-        pickle.dump(train_hard_neg, f)
-    print(f"  hard_neg_candidates: {len(train_hard_neg):,} triggers")
+    # Save from_provider arrays (used by collate_fn)
+    np.save(f"{CACHE_DIR}/train_from_provider_ids.npy", all_arrays["from_provider_ids"][:n_train])
+    np.save(f"{CACHE_DIR}/val_from_provider_ids.npy",   all_arrays["from_provider_ids"][n_train:])
+    with open(f"{CACHE_DIR}/from_provider_to_cands.pkl", "wb") as f:
+        pickle.dump(from_provider_to_cands, f)
+    print(f"  from_provider_to_cands: {len(from_provider_to_cands):,} unique from_providers")
 
     del all_arrays
     gc.collect()
