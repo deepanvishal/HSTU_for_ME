@@ -98,6 +98,7 @@ else:
             ,CAST(trigger_date AS STRING)                AS trigger_date
             ,trigger_dx
             ,trigger_dx_clean
+            ,from_provider
             ,member_segment
             ,is_t30_qualified
             ,is_t60_qualified
@@ -117,7 +118,8 @@ M = len(label_df)
 print(f"Test triggers: {M:,} — one row each ✓")
 
 # Vectorized encoding
-label_df["trigger_dx_id"] = label_df["trigger_dx_clean"].map(dx_vocab).fillna(UNK_IDX).astype(np.int32)
+label_df["trigger_dx_id"]      = label_df["trigger_dx_clean"].map(dx_vocab).fillna(UNK_IDX).astype(np.int32)
+label_df["from_provider_id_enc"] = label_df["from_provider"].map(provider_vocab).fillna(-1).astype(np.int32)
 
 def encode_label_list(lst, vocab):
     if lst is None or (hasattr(lst, '__len__') and len(lst) == 0):
@@ -188,7 +190,8 @@ if os.path.exists(TEST_CACHE):
     keys = ["seq_matrix", "delta_t_matrix", "trigger_token", "seq_lengths",
             "lab_t30", "lab_t60", "lab_t180",
             "is_t30", "is_t60", "is_t180",
-            "member_ids", "trigger_dates", "trigger_dxs", "segments"]
+            "member_ids", "trigger_dates", "trigger_dxs", "segments",
+            "from_provider_ids"]
     test_data = {k: np.load(f"{CACHE_DIR}/test_{k}.npy", allow_pickle=True) for k in keys}
     print(f"Loaded test={test_data['seq_matrix'].shape[0]:,}")
 else:
@@ -196,8 +199,9 @@ else:
     label_df["trigger_idx"] = label_df.index.astype(np.int32)
 
     # ── 3a: Metadata ──────────────────────────────────────────────────────────
-    trigger_token     = label_df["trigger_dx_id"].values.reshape(-1, 1).astype(np.int32)
-    is_t30_arr        = label_df["is_t30_qualified"].values.astype(bool)
+    trigger_token      = label_df["trigger_dx_id"].values.reshape(-1, 1).astype(np.int32)
+    from_provider_ids  = label_df["from_provider_id_enc"].values.astype(np.int32)
+    is_t30_arr         = label_df["is_t30_qualified"].values.astype(bool)
     is_t60_arr        = label_df["is_t60_qualified"].values.astype(bool)
     is_t180_arr       = label_df["is_t180_qualified"].values.astype(bool)
     member_ids_arr    = label_df["member_id"].values
@@ -250,20 +254,21 @@ else:
     print(f"Valid test triggers: {len(valid_idx):,}/{M:,}")
 
     test_data = dict(
-        seq_matrix    = seq_matrix[valid_idx],
-        delta_t_matrix= delta_t_mat[valid_idx],
-        trigger_token = trigger_token[valid_idx],
-        seq_lengths   = seq_lengths[valid_idx],
-        lab_t30       = lab_t30[valid_idx],
-        lab_t60       = lab_t60[valid_idx],
-        lab_t180      = lab_t180[valid_idx],
-        is_t30        = is_t30_arr[valid_idx],
-        is_t60        = is_t60_arr[valid_idx],
-        is_t180       = is_t180_arr[valid_idx],
-        member_ids    = member_ids_arr[valid_idx],
-        trigger_dates = trigger_dates_arr[valid_idx],
-        trigger_dxs   = trigger_dxs_arr[valid_idx],
-        segments      = segments_arr[valid_idx],
+        seq_matrix       = seq_matrix[valid_idx],
+        delta_t_matrix   = delta_t_mat[valid_idx],
+        trigger_token    = trigger_token[valid_idx],
+        seq_lengths      = seq_lengths[valid_idx],
+        lab_t30          = lab_t30[valid_idx],
+        lab_t60          = lab_t60[valid_idx],
+        lab_t180         = lab_t180[valid_idx],
+        is_t30           = is_t30_arr[valid_idx],
+        is_t60           = is_t60_arr[valid_idx],
+        is_t180          = is_t180_arr[valid_idx],
+        member_ids       = member_ids_arr[valid_idx],
+        trigger_dates    = trigger_dates_arr[valid_idx],
+        trigger_dxs      = trigger_dxs_arr[valid_idx],
+        segments         = segments_arr[valid_idx],
+        from_provider_ids= from_provider_ids[valid_idx],
     )
 
     print("Saving test arrays...")
