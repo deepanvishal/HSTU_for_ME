@@ -401,9 +401,7 @@ else:
     trigger_dxs_arr   = trigger_dxs_arr[valid_idx]
     segments_arr      = segments_arr[valid_idx]
 
-    old_to_new = {old: new for new, old in enumerate(valid_idx)}
-    hard_neg_candidates = {old_to_new[k]: v for k, v in hard_neg_candidates.items()
-                           if k in old_to_new}
+    # from_provider_ids already filtered via valid_idx above — no remap needed
 
     # Already sorted by trigger_date from BQ — no sort needed
     # Verify
