@@ -236,9 +236,11 @@ for row in hn_df.itertuples(index=False):
     fp   = row.from_provider
     spec = row.to_specialty
     # Encode candidate provider strings to int_ids — filter to known vocab
+    cands_raw = row.to_provider_candidates
+    if cands_raw is None or (hasattr(cands_raw, '__len__') and len(cands_raw) == 0):
+        continue
     cands_int = np.array(
-        [provider_vocab[p] for p in (row.to_provider_candidates or [])
-         if p in provider_vocab],
+        [provider_vocab[p] for p in cands_raw if p in provider_vocab],
         dtype=np.int32
     )
     if len(cands_int) == 0:
