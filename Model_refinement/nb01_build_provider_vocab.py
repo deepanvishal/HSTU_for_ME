@@ -191,27 +191,11 @@ if os.path.exists(PROV_SPEC_CACHE):
     print("Loading from cache...")
     with open(PROV_SPEC_CACHE, "rb") as f: provider_specialty_map = pickle.load(f)
 else:
-    print("Reading primary specialty per provider from BQ...")
+    # Read from pre-computed table (SQL_01b) — not the heavy visits GROUP BY
+    print("Reading primary specialty from pre-computed BQ table (SQL_01b)...")
     prov_spec_df = client.query(f"""
-        WITH specialty_counts AS (
-            SELECT
-                srv_prvdr_id
-                ,specialty_ctg_cd
-                ,COUNT(*)                                AS visit_count
-            FROM `{DS}.A870800_gen_rec_visits`
-            WHERE srv_prvdr_id     IS NOT NULL
-              AND specialty_ctg_cd IS NOT NULL
-              AND specialty_ctg_cd != ''
-            GROUP BY srv_prvdr_id, specialty_ctg_cd
-        )
-        SELECT
-            srv_prvdr_id
-            ,specialty_ctg_cd                            AS primary_specialty
-        FROM specialty_counts
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY srv_prvdr_id
-            ORDER BY visit_count DESC
-        ) = 1
+        SELECT srv_prvdr_id, primary_specialty
+        FROM `{DS}.A870800_gen_rec_provider_primary_specialty`
     """).to_dataframe()
 
     qa_df(prov_spec_df, "provider_specialty_map", check_cols=["primary_specialty"], sample_n=5)
