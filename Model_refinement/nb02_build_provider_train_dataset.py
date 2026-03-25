@@ -1,10 +1,13 @@
 # ============================================================
-# NB_02 — build_provider_train_dataset.py  (vectorized)
+# NB_02 — build_provider_train_dataset.py  (BQ-first, vectorized)
 # Purpose : Build provider train numpy arrays from BQ data
-#           Run once per sample — shared by SASRec, BERT4Rec, HSTU
+#           BQ does ALL heavy lifting — Python is a thin consumer
 # Sources : A870800_gen_rec_provider_train_sequences_{SAMPLE}
-#           A870800_gen_rec_provider_model_train_{SAMPLE}
-#           A870800_gen_rec_provider_transitions
+#             flat rows per (trigger, recency_rank) — SQL_03
+#           A870800_gen_rec_provider_model_train_agg_{SAMPLE}
+#             ONE ROW PER TRIGGER — labels pre-aggregated by BQ ARRAY_AGG
+#           A870800_gen_rec_provider_hardneg_lookup
+#             pre-aggregated hard neg candidates per (from_provider, specialty)
 # Output  : ./cache_provider_{SAMPLE}/
 #               train_seq_matrix.npy        (N, 20, 2) int32
 #               train_delta_t_matrix.npy    (N, 20) int32
@@ -14,20 +17,22 @@
 #               train_hard_neg_candidates.pkl
 #               train_is_t30/t60/t180.npy   (N,) bool
 #               train_member_ids/trigger_dates/trigger_dxs/segments.npy
-#               val_*.npy  (same keys — last 10% by trigger_date)
-# Vectorization:
-#   seq_matrix: built with numpy advanced indexing — no Python trigger loop
-#   labels:     groupby+agg → dict lookup — no itertuples
-#   transitions: groupby → nested dict — no itertuples over 41M rows
-#   hard negs:  per-trigger loop unavoidable (depends on per-trigger positives)
-#               but minimized with pre-built specialty lookup arrays
+#               val_*.npy  (mirror — last 10% by trigger_date)
+# What Python does:
+#   1. Pull pre-aggregated label rows (1 row per trigger) — no groupby
+#   2. Pull sequences (flat rows) — encode with vocab maps
+#   3. Pull hard neg lookup — pre-aggregated by BQ
+#   4. Encode provider/specialty/dx ids with vectorized .map()
+#   5. Build seq_matrix with numpy advanced indexing
+#   6. Assign labels directly from pre-aggregated arrays — no loop
+#   7. Build hard neg candidates — small loop over triggers WITH hard negs
 # ============================================================
 
 import gc
 import os
 import pickle
 import time
-from collections import defaultdict
+from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -80,80 +85,37 @@ display(Markdown(f"""
 | Max sequence length | {MAX_SEQ_LEN} |
 | Val fraction | {VAL_FRAC} |
 | Cache dir | {CACHE_DIR} |
+| BQ does | label aggregation, hard neg lookup |
+| Python does | vocab encoding, numpy assembly |
 """))
 
 
-# ── LOAD VOCABS ───────────────────────────────────────────────────────────────
+# ── LOAD VOCABS (from NB_01) ──────────────────────────────────────────────────
 print("Loading vocabs from NB_01...")
-with open(f"{CACHE_DIR}/provider_vocab.pkl",       "rb") as f: provider_vocab        = pickle.load(f)
-with open(f"{CACHE_DIR}/specialty_vocab.pkl",      "rb") as f: specialty_vocab       = pickle.load(f)
-with open(f"{CACHE_DIR}/dx_vocab.pkl",             "rb") as f: dx_vocab              = pickle.load(f)
-with open(f"{CACHE_DIR}/provider_specialty_map.pkl","rb") as f: provider_specialty_map = pickle.load(f)
+with open(f"{CACHE_DIR}/provider_vocab.pkl",  "rb") as f: provider_vocab  = pickle.load(f)
+with open(f"{CACHE_DIR}/specialty_vocab.pkl", "rb") as f: specialty_vocab = pickle.load(f)
+with open(f"{CACHE_DIR}/dx_vocab.pkl",        "rb") as f: dx_vocab        = pickle.load(f)
 
 PROVIDER_VOCAB_SIZE = len(provider_vocab)
-print(f"  provider_vocab={PROVIDER_VOCAB_SIZE:,}  specialty={len(specialty_vocab):,}  "
-      f"dx={len(dx_vocab):,}  prov_spec={len(provider_specialty_map):,}")
+print(f"  provider={PROVIDER_VOCAB_SIZE:,}  specialty={len(specialty_vocab):,}  dx={len(dx_vocab):,}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 1 — PULL + ENCODE TRAIN SEQUENCES
-# ══════════════════════════════════════════════════════════════════════════════
-t0 = time.time()
-display(Markdown("---\n## Section 1 — Pull Train Sequences"))
-
-SEQ_CACHE = f"{CACHE_DIR}/raw_train_seq_df.parquet"
-
-if os.path.exists(SEQ_CACHE):
-    print("Loading from cache...")
-    seq_df = pd.read_parquet(SEQ_CACHE)
-else:
-    print("Reading from BQ...")
-    seq_df = client.query(f"""
-        SELECT
-            member_id
-            ,CAST(trigger_date AS STRING)                AS trigger_date
-            ,trigger_dx
-            ,member_segment
-            ,is_t30_qualified
-            ,is_t60_qualified
-            ,is_t180_qualified
-            ,srv_prvdr_id
-            ,specialty_ctg_cd
-            ,delta_t_bucket
-            ,recency_rank
-        FROM `{DS}.A870800_gen_rec_provider_train_sequences_{SAMPLE}`
-        ORDER BY member_id, trigger_date, trigger_dx, recency_rank
-    """).to_dataframe()
-    seq_df["trigger_date"] = seq_df["trigger_date"].astype(str).str[:10]
-    qa_df(seq_df, "seq_df raw", check_cols=["member_segment", "recency_rank"])
-    seq_df.to_parquet(SEQ_CACHE, index=False)
-
-seq_df["trigger_date"] = seq_df["trigger_date"].astype(str).str[:10]
-
-# Vectorized encoding via pandas .map()
-seq_df["provider_id"]  = seq_df["srv_prvdr_id"].map(provider_vocab).fillna(UNK_IDX).astype(np.int32)
-seq_df["specialty_id"] = seq_df["specialty_ctg_cd"].map(specialty_vocab).fillna(UNK_IDX).astype(np.int32)
-seq_df["delta_t_int"]  = seq_df["delta_t_bucket"].fillna(0).astype(np.int32)
-
-unk_pct = (seq_df["provider_id"] == UNK_IDX).mean() * 100
-print(f"Provider UNK rate: {unk_pct:.1f}% (tail providers → UNK)")
-print(f"Section 1 done — {len(seq_df):,} rows | {time.time()-t0:.1f}s")
-display(Markdown(f"**Seq rows:** {len(seq_df):,} | **UNK:** {unk_pct:.1f}% | **Time:** {time.time()-t0:.1f}s"))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — PULL + ENCODE TRAIN LABELS
+# SECTION 1 — PULL TRAIN LABELS (pre-aggregated — ONE ROW PER TRIGGER)
+# BQ ARRAY_AGG already groups labels per trigger per window
+# Python has zero groupby work to do here
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
-display(Markdown("---\n## Section 2 — Pull Train Labels"))
+display(Markdown("---\n## Section 1 — Pull Train Labels (pre-aggregated)"))
 
-LABEL_CACHE = f"{CACHE_DIR}/raw_train_label_df.parquet"
+LABEL_CACHE = f"{CACHE_DIR}/raw_train_label_agg_df.parquet"
 
 if os.path.exists(LABEL_CACHE):
     print("Loading from cache...")
     label_df = pd.read_parquet(LABEL_CACHE)
 else:
-    print("Reading from BQ...")
+    print("Reading pre-aggregated labels from BQ...")
+    # One row per trigger — BQ already did ARRAY_AGG
     label_df = client.query(f"""
         SELECT
             member_id
@@ -165,109 +127,146 @@ else:
             ,is_t30_qualified
             ,is_t60_qualified
             ,is_t180_qualified
-            ,label_provider
-            ,time_bucket
-        FROM `{DS}.A870800_gen_rec_provider_model_train_{SAMPLE}`
-        WHERE label_provider IS NOT NULL
+            ,lab_t30
+            ,lab_t60
+            ,lab_t180
+        FROM `{DS}.A870800_gen_rec_provider_model_train_agg_{SAMPLE}`
+        ORDER BY trigger_date, member_id, trigger_dx
     """).to_dataframe()
     label_df["trigger_date"] = label_df["trigger_date"].astype(str).str[:10]
-    qa_df(label_df, "label_df raw", check_cols=["time_bucket"])
+    qa_df(label_df, "label_df (one row per trigger)", check_cols=["member_segment"])
     label_df.to_parquet(LABEL_CACHE, index=False)
 
 label_df["trigger_date"] = label_df["trigger_date"].astype(str).str[:10]
 
-# Vectorized encoding
-# trigger_dx_clean for dx lookup — NOT trigger_dx (raw with dots)
-label_df["label_provider_id"] = label_df["label_provider"].map(provider_vocab).fillna(UNK_IDX).astype(np.int32)
-label_df["trigger_dx_id"]     = label_df["trigger_dx_clean"].map(dx_vocab).fillna(UNK_IDX).astype(np.int32)
+N = len(label_df)
+print(f"Triggers: {N:,} — one row each, labels pre-aggregated by BQ ✓")
 
-print(f"Section 2 done — {len(label_df):,} label rows | {time.time()-t0:.1f}s")
-display(Markdown(f"**Label rows:** {len(label_df):,} | **Time:** {time.time()-t0:.1f}s"))
+# Vectorized: encode trigger_dx_clean for trigger token
+label_df["trigger_dx_id"] = label_df["trigger_dx_clean"].map(dx_vocab).fillna(UNK_IDX).astype(np.int32)
+
+# Vectorized: encode lab arrays — apply over pre-built lists
+def encode_label_list(lst, vocab):
+    if lst is None or (hasattr(lst, '__len__') and len(lst) == 0):
+        return []
+    return [vocab.get(p, UNK_IDX) for p in lst]
+
+label_df["lab_t30_ids"]  = label_df["lab_t30"].apply(lambda x: encode_label_list(x, provider_vocab))
+label_df["lab_t60_ids"]  = label_df["lab_t60"].apply(lambda x: encode_label_list(x, provider_vocab))
+label_df["lab_t180_ids"] = label_df["lab_t180"].apply(lambda x: encode_label_list(x, provider_vocab))
+
+print(f"Section 1 done — {N:,} triggers | {time.time()-t0:.1f}s")
+display(Markdown(f"**Triggers:** {N:,} | **Time:** {time.time()-t0:.1f}s"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — BUILD HARD NEGATIVE CANDIDATE LOOKUP FROM TRANSITIONS
-# Vectorized: pandas groupby replaces itertuples over 41M rows
-# Result: {from_provider -> {specialty -> np.array([to_provider_int_ids])}}
+# SECTION 2 — PULL TRAIN SEQUENCES (flat rows per recency_rank)
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
-display(Markdown("---\n## Section 3 — Build Hard Negative Lookup"))
+display(Markdown("---\n## Section 2 — Pull Train Sequences"))
 
-TRANS_CACHE  = f"{CACHE_DIR}/raw_transitions_df.parquet"
-HARDNEG_LOOKUP_CACHE = f"{CACHE_DIR}/from_to_by_specialty.pkl"
+SEQ_CACHE = f"{CACHE_DIR}/raw_train_seq_df.parquet"
 
-if os.path.exists(HARDNEG_LOOKUP_CACHE):
-    print("Loading hard neg lookup from cache...")
-    with open(HARDNEG_LOOKUP_CACHE, "rb") as f:
-        from_to_by_specialty = pickle.load(f)
+if os.path.exists(SEQ_CACHE):
+    print("Loading from cache...")
+    seq_df = pd.read_parquet(SEQ_CACHE)
 else:
-    if os.path.exists(TRANS_CACHE):
-        print("Loading transitions from cache...")
-        trans_df = pd.read_parquet(TRANS_CACHE)
-    else:
-        print("Reading transitions from BQ...")
-        trans_df = client.query(f"""
-            SELECT from_provider, to_provider, transition_count
-            FROM `{DS}.A870800_gen_rec_provider_transitions`
-            WHERE from_provider IS NOT NULL AND to_provider IS NOT NULL
-        """).to_dataframe()
-        trans_df.to_parquet(TRANS_CACHE, index=False)
+    print("Reading train sequences from BQ...")
+    seq_df = client.query(f"""
+        SELECT
+            member_id
+            ,CAST(trigger_date AS STRING)                AS trigger_date
+            ,trigger_dx
+            ,srv_prvdr_id
+            ,specialty_ctg_cd
+            ,delta_t_bucket
+            ,recency_rank
+        FROM `{DS}.A870800_gen_rec_provider_train_sequences_{SAMPLE}`
+        ORDER BY member_id, trigger_date, trigger_dx, recency_rank
+    """).to_dataframe()
+    seq_df["trigger_date"] = seq_df["trigger_date"].astype(str).str[:10]
+    qa_df(seq_df, "seq_df raw", check_cols=["recency_rank"])
+    seq_df.to_parquet(SEQ_CACHE, index=False)
 
-    print(f"Transitions: {len(trans_df):,} rows — vectorizing...")
-    t1 = time.time()
+seq_df["trigger_date"] = seq_df["trigger_date"].astype(str).str[:10]
 
-    # Vectorized: map to_provider to int_id and specialty in one shot
-    top80_set = set(k for k in provider_vocab if k not in ("PAD", "UNK"))
+# Vectorized encoding
+seq_df["provider_id"]  = seq_df["srv_prvdr_id"].map(provider_vocab).fillna(UNK_IDX).astype(np.int32)
+seq_df["specialty_id"] = seq_df["specialty_ctg_cd"].map(specialty_vocab).fillna(UNK_IDX).astype(np.int32)
+seq_df["delta_t_int"]  = seq_df["delta_t_bucket"].fillna(0).astype(np.int32)
 
-    trans_df["to_int"] = trans_df["to_provider"].map(provider_vocab)
-    trans_df["to_spec"] = trans_df["to_provider"].map(provider_specialty_map)
-
-    # Filter: only to_providers in top80 with a known specialty
-    trans_valid = trans_df.dropna(subset=["to_int", "to_spec"]).copy()
-    trans_valid["to_int"] = trans_valid["to_int"].astype(np.int32)
-
-    print(f"  Valid transitions (top80 + known specialty): {len(trans_valid):,}")
-
-    # Vectorized groupby: {from_provider -> {specialty -> [to_int_ids]}}
-    # groupby(['from_provider','to_spec'])['to_int'].apply(list) then pivot to nested dict
-    grouped_trans = (
-        trans_valid
-        .groupby(["from_provider", "to_spec"])["to_int"]
-        .apply(np.array)
-        .reset_index()
-    )
-
-    # Build nested dict: {from_provider -> {specialty -> np.array}}
-    from_to_by_specialty = {}
-    for from_p, grp in grouped_trans.groupby("from_provider"):
-        from_to_by_specialty[from_p] = dict(
-            zip(grp["to_spec"], grp["to_int"])
-        )
-
-    print(f"  from_providers with transitions: {len(from_to_by_specialty):,} | {time.time()-t1:.1f}s")
-
-    with open(HARDNEG_LOOKUP_CACHE, "wb") as f:
-        pickle.dump(from_to_by_specialty, f)
-
-    del trans_df, trans_valid, grouped_trans
-    gc.collect()
-
-print(f"Section 3 done — {time.time()-t0:.1f}s")
-display(Markdown(f"**Hard neg lookup built** | **Time:** {time.time()-t0:.1f}s"))
+unk_pct = (seq_df["provider_id"] == UNK_IDX).mean() * 100
+print(f"Provider UNK rate: {unk_pct:.1f}%")
+print(f"Section 2 done — {len(seq_df):,} rows | {time.time()-t0:.1f}s")
+display(Markdown(f"**Seq rows:** {len(seq_df):,} | **UNK:** {unk_pct:.1f}% | **Time:** {time.time()-t0:.1f}s"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — BUILD TRIGGER INDEX + METADATA (vectorized)
-# Assign a dense integer trigger_idx to each unique (member, date, dx)
-# All downstream arrays indexed by trigger_idx
+# SECTION 3 — PULL HARD NEG LOOKUP (pre-aggregated by BQ)
+# BQ already computed: {from_provider → specialty → [to_provider candidates]}
+# Python just loads and encodes — no 41M row groupby
 # ══════════════════════════════════════════════════════════════════════════════
 t0 = time.time()
-display(Markdown("---\n## Section 4 — Build Trigger Index"))
+display(Markdown("---\n## Section 3 — Pull Hard Neg Lookup"))
+
+HARDNEG_CACHE = f"{CACHE_DIR}/hardneg_lookup_df.parquet"
+
+if os.path.exists(HARDNEG_CACHE):
+    print("Loading from cache...")
+    hn_df = pd.read_parquet(HARDNEG_CACHE)
+else:
+    print("Reading pre-aggregated hard neg lookup from BQ...")
+    hn_df = client.query(f"""
+        SELECT
+            from_provider
+            ,to_specialty
+            ,to_provider_candidates
+        FROM `{DS}.A870800_gen_rec_provider_hardneg_lookup`
+        WHERE from_provider IS NOT NULL
+    """).to_dataframe()
+    qa_df(hn_df, "hard neg lookup", sample_n=3)
+    hn_df.to_parquet(HARDNEG_CACHE, index=False)
+
+# Build lookup: {from_provider -> {specialty -> np.array(int_ids)}}
+# Vectorized: encode to_provider_candidates arrays
+print("Encoding hard neg candidates...")
+t1 = time.time()
+from_to_by_specialty = {}
+for row in hn_df.itertuples(index=False):
+    fp   = row.from_provider
+    spec = row.to_specialty
+    # Encode candidate provider strings to int_ids — filter to known vocab
+    cands_int = np.array(
+        [provider_vocab[p] for p in (row.to_provider_candidates or [])
+         if p in provider_vocab],
+        dtype=np.int32
+    )
+    if len(cands_int) == 0:
+        continue
+    if fp not in from_to_by_specialty:
+        from_to_by_specialty[fp] = {}
+    from_to_by_specialty[fp][spec] = cands_int
+
+print(f"  from_providers: {len(from_to_by_specialty):,} | {time.time()-t1:.1f}s")
+print(f"  Note: itertuples over {len(hn_df):,} rows (much smaller than 41M transitions)")
+print(f"Section 3 done — {time.time()-t0:.1f}s")
+display(Markdown(f"**Hard neg lookup:** {len(from_to_by_specialty):,} from_providers | **Time:** {time.time()-t0:.1f}s"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 4 — BUILD NUMPY ARRAYS
+# Python's only job: assemble pre-encoded data into numpy format
+# seq_matrix: vectorized numpy advanced indexing
+# labels: direct assignment from pre-aggregated BQ arrays — no groupby
+# hard negs: per-trigger loop — unavoidable but minimized
+# ══════════════════════════════════════════════════════════════════════════════
+t0 = time.time()
+display(Markdown("---\n## Section 4 — Build Numpy Arrays"))
 
 TRAIN_CACHE = f"{CACHE_DIR}/train_seq_matrix.npy"
 
 if os.path.exists(TRAIN_CACHE):
-    print("Train numpy cache exists — loading...")
+    print("Cache exists — loading...")
     keys = ["seq_matrix", "delta_t_matrix", "trigger_token", "seq_lengths",
             "lab_t30", "lab_t60", "lab_t180",
             "is_t30", "is_t60", "is_t180",
@@ -276,70 +275,53 @@ if os.path.exists(TRAIN_CACHE):
     val_data   = {k: np.load(f"{CACHE_DIR}/val_{k}.npy",   allow_pickle=True) for k in keys}
     with open(f"{CACHE_DIR}/train_hard_neg_candidates.pkl", "rb") as f:
         hard_neg_candidates = pickle.load(f)
-    N_train = train_data["seq_matrix"].shape[0]
-    N_val   = val_data["seq_matrix"].shape[0]
-    print(f"Loaded train={N_train:,} | val={N_val:,}")
+    print(f"Loaded train={train_data['seq_matrix'].shape[0]:,} | val={val_data['seq_matrix'].shape[0]:,}")
 else:
-    # ── 4a: Trigger metadata from label_df ────────────────────────────────────
-    # One row per unique (member, trigger_date, trigger_dx)
-    meta_cols = ["member_id", "trigger_date", "trigger_dx",
-                 "trigger_dx_id", "from_provider", "member_segment",
-                 "is_t30_qualified", "is_t60_qualified", "is_t180_qualified"]
-    meta_df = (
-        label_df[meta_cols]
-        .drop_duplicates(["member_id", "trigger_date", "trigger_dx"])
-        .reset_index(drop=True)
-    )
-    meta_df["trigger_idx"] = meta_df.index.astype(np.int32)
-    N = len(meta_df)
-    print(f"Unique triggers: {N:,}")
+    # label_df is already sorted by trigger_date (from BQ ORDER BY)
+    # trigger_idx = row position in label_df
+    label_df = label_df.reset_index(drop=True)
+    label_df["trigger_idx"] = label_df.index.astype(np.int32)
 
-    # ── 4b: Build sparse labels vectorized ────────────────────────────────────
-    # groupby on (member, date, dx, bucket) → list of label_provider_ids
-    print("Building sparse label arrays...")
+    # ── 4a: Metadata arrays — vectorized from label_df ────────────────────────
+    print("4a: Building metadata arrays (vectorized)...")
+    trigger_token     = label_df["trigger_dx_id"].values.reshape(-1, 1).astype(np.int32)
+    is_t30_arr        = label_df["is_t30_qualified"].values.astype(bool)
+    is_t60_arr        = label_df["is_t60_qualified"].values.astype(bool)
+    is_t180_arr       = label_df["is_t180_qualified"].values.astype(bool)
+    member_ids_arr    = label_df["member_id"].values
+    trigger_dates_arr = label_df["trigger_date"].values
+    trigger_dxs_arr   = label_df["trigger_dx"].values
+    segments_arr      = label_df["member_segment"].fillna("Unknown").values
+
+    # ── 4b: Sparse label arrays — direct from pre-aggregated BQ data ──────────
+    # NO groupby, NO loop over N triggers, NO dict lookup
+    # BQ already aggregated — just assign the encoded lists
+    print("4b: Assigning sparse labels (direct from BQ arrays)...")
+    t1 = time.time()
+    lab_t30  = label_df["lab_t30_ids"].values   # already list of int_ids per trigger
+    lab_t60  = label_df["lab_t60_ids"].values
+    lab_t180 = label_df["lab_t180_ids"].values
+    print(f"  Labels assigned in {time.time()-t1:.1f}s — no Python groupby ✓")
+
+    # ── 4c: seq_matrix — vectorized numpy advanced indexing ───────────────────
+    print("4c: Building seq_matrix (vectorized numpy)...")
     t1 = time.time()
 
-    label_grp = (
-        label_df
-        .groupby(["member_id", "trigger_date", "trigger_dx", "time_bucket"])["label_provider_id"]
-        .apply(list)
-    )
-
-    # Build lookup dict per bucket — vectorized dict from multiindex
-    lab_dict = {"T0_30": {}, "T30_60": {}, "T60_180": {}}
-    for (member, tdate, tdx, bucket), ids in label_grp.items():
-        lab_dict[bucket][(member, tdate, tdx)] = list(set(ids))
-
-    print(f"  Label lookup built — {time.time()-t1:.1f}s")
-
-    # ── 4c: Build seq_matrix FULLY vectorized ─────────────────────────────────
-    # Key insight: assign trigger_idx to each seq_df row via merge
-    # Then use numpy advanced indexing to fill seq_matrix in one shot
-    print("Building seq_matrix (vectorized)...")
-    t1 = time.time()
-
-    # Merge trigger_idx into seq_df
+    # Assign trigger_idx to seq_df via merge on (member, date, dx)
     seq_df2 = seq_df.merge(
-        meta_df[["member_id", "trigger_date", "trigger_dx", "trigger_idx"]],
-        on=["member_id", "trigger_date", "trigger_dx"],
+        label_df[["member_id","trigger_date","trigger_dx","trigger_idx"]],
+        on=["member_id","trigger_date","trigger_dx"],
         how="inner"
     )
-
-    # Group size per trigger → seq_lengths
-    group_sizes = seq_df2.groupby("trigger_idx")["recency_rank"].transform("count").astype(np.int32)
-    seq_lengths = np.zeros(N, dtype=np.int32)
-    # Most recent group_size per trigger_idx
-    tmp = seq_df2.groupby("trigger_idx").size()
-    seq_lengths[tmp.index.values] = np.minimum(tmp.values, MAX_SEQ_LEN).astype(np.int32)
-
-    # Position in seq_matrix:
-    # recency_rank 1 = most recent → goes to position MAX_SEQ_LEN - 1
-    # recency_rank k → goes to position MAX_SEQ_LEN - k  (if <= MAX_SEQ_LEN)
-    # Only keep recency_rank <= MAX_SEQ_LEN (already filtered in SQL_03)
     seq_df2 = seq_df2[seq_df2["recency_rank"] <= MAX_SEQ_LEN].copy()
     seq_df2["seq_pos"] = (MAX_SEQ_LEN - seq_df2["recency_rank"]).astype(np.int32)
 
-    # Allocate and fill with numpy advanced indexing — no Python loop
+    # Sequence lengths per trigger
+    seq_lengths = np.zeros(N, dtype=np.int32)
+    tmp = seq_df2.groupby("trigger_idx").size()
+    seq_lengths[tmp.index.values] = np.minimum(tmp.values, MAX_SEQ_LEN).astype(np.int32)
+
+    # Fill with single numpy advanced indexing — no Python trigger loop
     seq_matrix  = np.zeros((N, MAX_SEQ_LEN, 2), dtype=np.int32)
     delta_t_mat = np.zeros((N, MAX_SEQ_LEN),    dtype=np.int32)
 
@@ -349,93 +331,57 @@ else:
     spec_ids = seq_df2["specialty_id"].values.astype(np.int32)
     dt_vals  = seq_df2["delta_t_int"].values.astype(np.int32)
 
-    seq_matrix[trig_idx, seq_pos, 0] = prov_ids   # provider_id
-    seq_matrix[trig_idx, seq_pos, 1] = spec_ids   # specialty_id
+    seq_matrix[trig_idx, seq_pos, 0] = prov_ids
+    seq_matrix[trig_idx, seq_pos, 1] = spec_ids
     delta_t_mat[trig_idx, seq_pos]   = dt_vals
 
-    print(f"  seq_matrix built: {seq_matrix.shape} | {time.time()-t1:.1f}s")
-
+    print(f"  seq_matrix {seq_matrix.shape} built in {time.time()-t1:.1f}s ✓")
     del seq_df2, trig_idx, seq_pos, prov_ids, spec_ids, dt_vals
     gc.collect()
 
-    # ── 4d: Trigger token + qualification flags + metadata ─────────────────────
-    trigger_token = meta_df["trigger_dx_id"].values.reshape(-1, 1).astype(np.int32)
-    is_t30_arr    = meta_df["is_t30_qualified"].values.astype(bool)
-    is_t60_arr    = meta_df["is_t60_qualified"].values.astype(bool)
-    is_t180_arr   = meta_df["is_t180_qualified"].values.astype(bool)
-    member_ids_arr    = meta_df["member_id"].values
-    trigger_dates_arr = meta_df["trigger_date"].values
-    trigger_dxs_arr   = meta_df["trigger_dx"].values
-    segments_arr      = meta_df["member_segment"].fillna("Unknown").values
-
-    # ── 4e: Sparse labels ─────────────────────────────────────────────────────
-    lab_t30  = np.empty(N, dtype=object)
-    lab_t60  = np.empty(N, dtype=object)
-    lab_t180 = np.empty(N, dtype=object)
-
-    for i in range(N):
-        key = (member_ids_arr[i], trigger_dates_arr[i], trigger_dxs_arr[i])
-        lab_t30[i]  = lab_dict["T0_30"].get(key, [])
-        lab_t60[i]  = lab_dict["T30_60"].get(key, [])
-        lab_t180[i] = lab_dict["T60_180"].get(key, [])
-
-    del lab_dict, label_df
-    gc.collect()
-    print(f"  Labels built (sparse ragged)")
-
-    # ── 4f: Hard negative candidates ──────────────────────────────────────────
-    # Per-trigger loop unavoidable — depends on per-trigger positives
-    # Minimized: from_to_by_specialty pre-computed as numpy arrays
-    print("Building hard neg candidates (minimal loop)...")
+    # ── 4d: Hard neg candidates ────────────────────────────────────────────────
+    # Per-trigger loop — unavoidable (depends on per-trigger positives)
+    # But much smaller than before: only triggers WITH a from_provider in lookup
+    print("4d: Building hard neg candidates (minimal loop)...")
     t1 = time.time()
 
+    from_prov_arr = label_df["from_provider"].values
     hard_neg_candidates = {}
-    from_prov_arr = meta_df["from_provider"].values
 
     for i in range(N):
         from_prov = from_prov_arr[i]
         if from_prov not in from_to_by_specialty:
             continue
-        all_pos = set(
-            lab_t30[i].tolist() if hasattr(lab_t30[i], 'tolist') else lab_t30[i]
-        ) | set(
-            lab_t60[i].tolist() if hasattr(lab_t60[i], 'tolist') else lab_t60[i]
-        ) | set(
-            lab_t180[i].tolist() if hasattr(lab_t180[i], 'tolist') else lab_t180[i]
-        )
+        all_pos = set(lab_t30[i]) | set(lab_t60[i]) | set(lab_t180[i])
         if not all_pos:
             continue
-
         hard_negs = []
         for spec, cands in from_to_by_specialty[from_prov].items():
-            # cands is already a numpy array — vectorized exclusion
             mask = ~np.isin(cands, list(all_pos))
-            hard_negs.append(cands[mask])
-
+            if mask.any():
+                hard_negs.append(cands[mask])
         if hard_negs:
             combined = np.unique(np.concatenate(hard_negs))
             if len(combined) > 0:
                 hard_neg_candidates[i] = combined
 
-        if (i + 1) % 500_000 == 0:
+        if (i + 1) % 1_000_000 == 0:
             print(f"  Hard neg progress: {i+1:,}/{N:,}")
 
-    print(f"  Hard negs built: {len(hard_neg_candidates):,} triggers | {time.time()-t1:.1f}s")
+    print(f"  Hard negs: {len(hard_neg_candidates):,} triggers | {time.time()-t1:.1f}s")
 
-    del from_to_by_specialty, seq_df, meta_df
+    del seq_df, label_df, from_to_by_specialty
     gc.collect()
 
-    # ── 4g: Filter, sort, split ────────────────────────────────────────────────
-    # Filter: seq_len > 0
-    valid = seq_lengths > 0
-    n_valid = valid.sum()
+    # ── 4e: Filter + temporal sort + train/val split ───────────────────────────
+    valid     = seq_lengths > 0
+    valid_idx = np.where(valid)[0]
+    n_valid   = len(valid_idx)
     print(f"\nValid triggers: {n_valid:,}/{N:,}")
 
     any_label = np.array([len(lab_t30[i]) + len(lab_t60[i]) + len(lab_t180[i]) > 0
-                          for i in range(N)])
+                          for i in valid_idx])
     print(f"With labels: {any_label.sum():,} ({any_label.mean()*100:.1f}%)")
-
-    valid_idx = np.where(valid)[0]
 
     seq_matrix    = seq_matrix[valid_idx]
     delta_t_mat   = delta_t_mat[valid_idx]
@@ -452,44 +398,28 @@ else:
     trigger_dxs_arr   = trigger_dxs_arr[valid_idx]
     segments_arr      = segments_arr[valid_idx]
 
-    # Remap hard_neg keys
     old_to_new = {old: new for new, old in enumerate(valid_idx)}
     hard_neg_candidates = {old_to_new[k]: v for k, v in hard_neg_candidates.items()
                            if k in old_to_new}
 
-    # Temporal sort
-    sort_idx = np.argsort(trigger_dates_arr, kind="stable")
+    # Already sorted by trigger_date from BQ — no sort needed
+    # Verify
+    assert all(trigger_dates_arr[i] <= trigger_dates_arr[i+1]
+               for i in range(min(1000, len(trigger_dates_arr)-1))), \
+        "WARNING: not sorted by date"
+    print("Temporal order verified ✓ (sorted by BQ ORDER BY)")
 
-    seq_matrix    = seq_matrix[sort_idx]
-    delta_t_mat   = delta_t_mat[sort_idx]
-    trigger_token = trigger_token[sort_idx]
-    seq_lengths   = seq_lengths[sort_idx]
-    lab_t30       = lab_t30[sort_idx]
-    lab_t60       = lab_t60[sort_idx]
-    lab_t180      = lab_t180[sort_idx]
-    is_t30_arr    = is_t30_arr[sort_idx]
-    is_t60_arr    = is_t60_arr[sort_idx]
-    is_t180_arr   = is_t180_arr[sort_idx]
-    member_ids_arr    = member_ids_arr[sort_idx]
-    trigger_dates_arr = trigger_dates_arr[sort_idx]
-    trigger_dxs_arr   = trigger_dxs_arr[sort_idx]
-    segments_arr      = segments_arr[sort_idx]
-
-    # Remap hard_neg after sort
-    old_to_sorted = {old_sorted: new_sorted for new_sorted, old_sorted in enumerate(sort_idx)}
-    hard_neg_candidates = {old_to_sorted[k]: v for k, v in hard_neg_candidates.items()
-                           if k in old_to_sorted}
-
-    # Train/val split — last VAL_FRAC by trigger_date
+    # Train/val split
     N_total = seq_matrix.shape[0]
     n_val   = max(1, int(N_total * VAL_FRAC))
     n_train = N_total - n_val
 
-    print(f"\nTrain: {n_train:,} | Val: {n_val:,}")
-    print(f"Train dates: {trigger_dates_arr[0]} → {trigger_dates_arr[n_train-1]}")
-    print(f"Val   dates: {trigger_dates_arr[n_train]} → {trigger_dates_arr[-1]}")
+    print(f"Train: {n_train:,} | Val: {n_val:,}")
+    print(f"Train: {trigger_dates_arr[0]} → {trigger_dates_arr[n_train-1]}")
+    print(f"Val:   {trigger_dates_arr[n_train]} → {trigger_dates_arr[-1]}")
 
-    # Package and save
+    train_hard_neg = {k: v for k, v in hard_neg_candidates.items() if k < n_train}
+
     all_arrays = dict(
         seq_matrix=seq_matrix, delta_t_matrix=delta_t_mat,
         trigger_token=trigger_token, seq_lengths=seq_lengths,
@@ -499,48 +429,29 @@ else:
         trigger_dxs=trigger_dxs_arr, segments=segments_arr,
     )
 
-    train_sl = slice(0, n_train)
-    val_sl   = slice(n_train, None)
-    train_hard_neg = {k: v for k, v in hard_neg_candidates.items() if k < n_train}
-
-    train_data = {}
-    val_data   = {}
+    train_data = {}; val_data = {}
     print("\nSaving arrays...")
     for k, arr in all_arrays.items():
-        train_data[k] = arr[train_sl]
-        val_data[k]   = arr[val_sl]
+        train_data[k] = arr[:n_train]
+        val_data[k]   = arr[n_train:]
         np.save(f"{CACHE_DIR}/train_{k}.npy", train_data[k])
         np.save(f"{CACHE_DIR}/val_{k}.npy",   val_data[k])
-        print(f"  train_{k}: {train_data[k].shape}  val_{k}: {val_data[k].shape}")
+        print(f"  {k}: train={train_data[k].shape} val={val_data[k].shape}")
 
     with open(f"{CACHE_DIR}/train_hard_neg_candidates.pkl", "wb") as f:
         pickle.dump(train_hard_neg, f)
-    print(f"  train_hard_neg_candidates: {len(train_hard_neg):,} triggers")
+    print(f"  hard_neg_candidates: {len(train_hard_neg):,} triggers")
 
-    del all_arrays, hard_neg_candidates
+    del all_arrays
     gc.collect()
 
 print(f"\nSection 4 done — {time.time()-t0:.1f}s")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — QA SUMMARY
-# ══════════════════════════════════════════════════════════════════════════════
-display(Markdown("---\n## Section 5 — QA Summary"))
-
+# ── SUMMARY ───────────────────────────────────────────────────────────────────
+display(Markdown("---\n## Summary"))
 N_train = train_data["seq_matrix"].shape[0]
 N_val   = val_data["seq_matrix"].shape[0]
-
-# Sample check on first trigger
-i = 0
-print(f"Sample trigger[0]:")
-print(f"  member_id     : {train_data['member_ids'][i]}")
-print(f"  trigger_date  : {train_data['trigger_dates'][i]}")
-print(f"  seq_length    : {train_data['seq_lengths'][i]}")
-print(f"  trigger_token : {train_data['trigger_token'][i]}")
-print(f"  seq_matrix[-3:]: {train_data['seq_matrix'][i, -3:, :]}")
-print(f"  lab_t30       : {train_data['lab_t30'][i]}")
-print(f"  lab_t60       : {train_data['lab_t60'][i]}")
 
 display(Markdown(f"""
 ## Train Dataset Summary
@@ -553,6 +464,9 @@ display(Markdown(f"""
 | T30 qualified | {train_data['is_t30'].sum():,} |
 | T60 qualified | {train_data['is_t60'].sum():,} |
 | T180 qualified | {train_data['is_t180'].sum():,} |
+
+**BQ did:** label aggregation (ARRAY_AGG), hard neg lookup, sequence capping
+**Python did:** vocab encoding, numpy indexing, val split
 
 Next: run NB_03 to build test dataset.
 """))
