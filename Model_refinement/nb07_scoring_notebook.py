@@ -470,20 +470,21 @@ def score_model(model, loader, model_name, mask_idx=None):
                                       for idx in top5_idx_cpu[i].tolist()]
                     top5_sc        = [round(float(v), 4) for v in top5_vals_cpu[i]]
                     true_ids       = batch[lab_key][i].nonzero(as_tuple=True)[0].tolist()
-                    true_providers = [idx_to_provider.get(int(idx), "UNK") for idx in true_ids]
+                    true_providers = [str(idx_to_provider.get(int(idx), "UNK")) for idx in true_ids]
+                    top5_providers_str = [str(p) for p in top5_providers]
 
                     bq_rows.append({
-                        "member_id":        batch["member_ids"][i],
-                        "trigger_date":     batch["trigger_dates"][i],
-                        "trigger_dx":       batch["trigger_dxs"][i],
-                        "member_segment":   batch["segments"][i],
-                        "time_bucket":      bucket,
+                        "member_id":        str(batch["member_ids"][i]),
+                        "trigger_date":     str(batch["trigger_dates"][i]),
+                        "trigger_dx":       str(batch["trigger_dxs"][i]),
+                        "member_segment":   str(batch["segments"][i]),
+                        "time_bucket":      str(bucket),
                         "true_labels":      "|".join(sorted(true_providers)),
-                        "top5_predictions": "|".join(top5_providers),
+                        "top5_predictions": "|".join(top5_providers_str),
                         "top5_scores":      "|".join(str(s) for s in top5_sc),
-                        "model":            model_name,
-                        "sample":           SAMPLE,
-                        "run_timestamp":    RUN_TS,
+                        "model":            str(model_name),
+                        "sample":           str(SAMPLE),
+                        "run_timestamp":    str(RUN_TS),
                     })
 
     # Aggregate metrics
