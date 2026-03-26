@@ -46,7 +46,8 @@ DROPOUT      = 0.2
 LR           = 1e-3
 WEIGHT_DECAY = 1e-2
 BATCH_SIZE   = 512
-EPOCHS       = 1              # first pass — validate before tuning
+EPOCHS        = 1              # first pass — validate before tuning
+WARMUP_STEPS  = 200            # ~100-200 steps for 1-epoch dry run; scale up for full training
 NEG_K        = 128            # random negatives per sample
 HARD_NEG_K   = 32             # hard negatives per sample (capped)
 K_VALUES     = [1, 3, 5]
@@ -556,66 +557,41 @@ def metrics_at_k(scores, labels_multihot, k):
 
 def evaluate(loader, mdl):
     mdl.eval()
-    model_raw = get_raw(mdl)
-    results   = {}
-
-    buckets = {"T0_30": ("is_t30", "lab_t30"),
-               "T30_60": ("is_t60", "lab_t60"),
-               "T60_180": ("is_t180", "lab_t180")}
-
-    accum = {b: {k: [] for k in ["hit", "prec", "rec", "ndcg"]}
-             for b in buckets for k in K_VALUES}
-
-    with torch.no_grad():
-        for batch in loader:
-            seq     = batch["seq"].to(DEVICE, non_blocking=True)
-            trigger = batch["trigger"].to(DEVICE, non_blocking=True)
-            seq_len = batch["seq_len"].to(DEVICE, non_blocking=True)
-
-            with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
-                scores, _ = mdl(seq, trigger, seq_len)    # (B, V-2)
-
-            # Pad scores back to full vocab size for label alignment
-            # scores correspond to provider ids [2, PROVIDER_VOCAB_SIZE)
-            # Prepend two zeros for PAD=0 and UNK=1
-            B = scores.shape[0]
-            pad_scores = torch.zeros(B, 2, device=scores.device)
-            full_scores = torch.cat([pad_scores, scores], dim=1)  # (B, V)
-
-            for bucket, (flag_key, lab_key) in buckets.items():
-                mask = batch[flag_key].to(DEVICE)
-                if mask.sum() == 0:
-                    continue
-                labs  = batch[lab_key].to(DEVICE)       # (B, V)
-                s_m   = full_scores[mask]
-                l_m   = labs[mask]
-
-                for k in K_VALUES:
-                    m = metrics_at_k(s_m, l_m, k)
-                    for metric, val in m.items():
-                        accum[bucket][k] = accum[bucket].get(k, {})
-                        if metric not in accum[bucket]:
-                            accum[bucket][metric] = []
-                        # Fix: store per bucket+k+metric
-    # Recompute properly
-    bucket_k_metrics = {}
-    for bucket, (flag_key, lab_key) in buckets.items():
-        bucket_k_metrics[bucket] = {}
-
-    # Re-evaluate cleanly with proper accumulation
+    model_raw  = get_raw(mdl)
+    buckets    = {"T0_30":  ("is_t30",  "lab_t30"),
+                  "T30_60": ("is_t60",  "lab_t60"),
+                  "T60_180":("is_t180", "lab_t180")}
     all_metrics = {b: {k: {"hit":[],"prec":[],"rec":[],"ndcg":[]}
                         for k in K_VALUES} for b in buckets}
+    val_loss_sum, val_loss_n = 0.0, 0
 
     with torch.no_grad():
         for batch in loader:
-            seq     = batch["seq"].to(DEVICE, non_blocking=True)
+            seq     = batch["seq"].to(DEVICE,     non_blocking=True)
             trigger = batch["trigger"].to(DEVICE, non_blocking=True)
             seq_len = batch["seq_len"].to(DEVICE, non_blocking=True)
+            hard_negs_list = batch["hard_negs"]
+            B = seq.shape[0]
+
             with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
-                scores, _ = mdl(seq, trigger, seq_len)
-            B = scores.shape[0]
+                scores, user_repr = mdl(seq, trigger, seq_len)  # (B, V-2), (B, d)
+
+            # Val loss — same InfoNCE as training
+            neg_matrix = build_neg_matrix(B, hard_negs_list,
+                                          PROVIDER_VOCAB_SIZE,
+                                          NEG_K, HARD_NEG_K, DEVICE)
+            for flag_key, lab_key in [("is_t30","lab_t30"),("is_t60","lab_t60"),("is_t180","lab_t180")]:
+                flag = batch[flag_key].to(DEVICE)
+                if flag.sum() == 0: continue
+                labs = batch[lab_key].to(DEVICE)
+                wl   = batched_infonce_loss(user_repr[flag], labs[flag],
+                                            neg_matrix[flag], model_raw)
+                val_loss_sum += wl.item()
+                val_loss_n   += 1
+
+            # Ranking metrics
             pad_scores  = torch.zeros(B, 2, device=scores.device)
-            full_scores = torch.cat([pad_scores, scores], dim=1)
+            full_scores = torch.cat([pad_scores, scores], dim=1)  # (B, V)
 
             for bucket, (flag_key, lab_key) in buckets.items():
                 mask = batch[flag_key].to(DEVICE)
@@ -628,7 +604,7 @@ def evaluate(loader, mdl):
                     for metric, val in m.items():
                         all_metrics[bucket][k][metric].append(val)
 
-    results = {}
+    results = {"val_loss": round(val_loss_sum / max(val_loss_n, 1), 4)}
     for bucket in buckets:
         for k in K_VALUES:
             for metric in ["hit", "prec", "rec", "ndcg"]:
@@ -655,9 +631,22 @@ def print_metrics(metrics, split="Val"):
 t0 = time.time()
 display(Markdown("---\n## Section 6 — Training"))
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
-scaler    = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
+optimizer    = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+scaler       = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
+
+# Warmup + cosine decay
+# Linear warmup for WARMUP_STEPS, then cosine decay over remaining steps
+total_steps  = EPOCHS * len(train_loader)
+warmup_steps = min(WARMUP_STEPS, total_steps // 10)   # cap at 10% of total
+
+def lr_lambda(current_step):
+    if current_step < warmup_steps:
+        return float(current_step + 1) / float(max(warmup_steps, 1))
+    progress = float(current_step - warmup_steps) / float(max(total_steps - warmup_steps, 1))
+    return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+print(f"Scheduler: {warmup_steps} warmup steps → cosine decay over {total_steps} total steps")
 
 model_raw  = get_raw(model)
 best_ndcg  = 0.0
@@ -717,14 +706,15 @@ for epoch in range(EPOCHS):
         scaler.step(optimizer)
         scaler.update()
 
+        scheduler.step()   # per-batch step for warmup + cosine
         total_loss += loss.item()
         n_batches  += 1
 
         if (batch_idx + 1) % 100 == 0:
+            current_lr = scheduler.get_last_lr()[0]
             print(f"  Ep {epoch+1} | B {batch_idx+1}/{len(train_loader)} | "
-                  f"Loss: {total_loss/n_batches:.4f}")
+                  f"Train Loss (avg): {total_loss/n_batches:.4f} | LR: {current_lr:.2e}")
 
-    scheduler.step()
     avg_loss = total_loss / max(n_batches, 1)
     ep_time  = time.time() - t_ep
     print(f"  Epoch {epoch+1} done — loss={avg_loss:.4f} | time={ep_time:.0f}s")
@@ -734,13 +724,15 @@ for epoch in range(EPOCHS):
     val_ndcg    = np.mean([val_metrics.get(f"T0_30_ndcg@{k}", 0) for k in K_VALUES])
     print_metrics(val_metrics, f"Val Epoch {epoch+1}")
 
-    train_log.append({"epoch": epoch+1, "loss": avg_loss,
+    val_loss = val_metrics.get("val_loss", 0.0)
+    train_log.append({"epoch": epoch+1,
+                       "train_loss": avg_loss, "val_loss": val_loss,
                        "val_ndcg_t30": val_ndcg, **val_metrics})
 
     display(Markdown(
-        f"**Epoch {epoch+1}/{EPOCHS}** — "
-        f"Loss: {avg_loss:.4f} | Val NDCG@T30: {val_ndcg:.4f} | "
-        f"Time: {ep_time:.0f}s"
+        f"**Epoch {epoch+1}/{EPOCHS}** | "
+        f"Train Loss: `{avg_loss:.4f}` | Val Loss: `{val_loss:.4f}` | "
+        f"Val NDCG@T30: `{val_ndcg:.4f}` | Time: {ep_time:.0f}s"
     ))
 
     # ── Save checkpoint ───────────────────────────────────────────────────────
