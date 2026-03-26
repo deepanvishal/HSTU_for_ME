@@ -442,6 +442,7 @@ def score_model(model, loader, model_name, mask_idx=None, write_bq=True):
     is_hstu    = (model_name == "HSTU")
 
     t_score_start = time.time()
+    rows_written  = 0
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
             seq     = batch["seq"].to(DEVICE,     non_blocking=True)
@@ -525,15 +526,19 @@ def score_model(model, loader, model_name, mask_idx=None, write_bq=True):
 
         # Stream BQ rows every 50K
         if write_bq and len(bq_rows) >= _BQ_FLUSH_EVERY:
+            n = len(bq_rows)
             flush_to_bq(bq_rows)
-            print(f"  → Flushed {_BQ_FLUSH_EVERY:,} rows to BQ")
+            rows_written += n
             bq_rows = []
+            print(f"  → BQ flush: {n:,} rows | total written: {rows_written:,}")
 
     # Final flush
     if write_bq and bq_rows:
+        n = len(bq_rows)
         flush_to_bq(bq_rows)
-        print(f"  → Final flush: {len(bq_rows):,} rows to BQ")
+        rows_written += n
         bq_rows = []
+        print(f"  → Final BQ flush: {n:,} rows | total written: {rows_written:,}")
 
     # Aggregate metrics
     results = {}
