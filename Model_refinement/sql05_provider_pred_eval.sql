@@ -60,7 +60,7 @@ markov_preds_agg AS (
         ,mp.is_t60_qualified
         ,mp.is_t180_qualified
         ,ARRAY_AGG(
-            mp.predicted_provider
+            CAST(mp.predicted_provider AS STRING)
             ORDER BY mp.prediction_rank
             LIMIT 5
         )                                                AS pred_array
@@ -112,9 +112,9 @@ markov_rows AS (
         AND mp.member_segment = tl.member_segment
     -- Unpivot windows using CROSS JOIN with inline table
     CROSS JOIN UNNEST([
-        STRUCT('T0_30'   AS time_bucket, tl.true_t30  AS true_array, mp.is_t30_qualified  AS qualified),
-        STRUCT('T30_60'  AS time_bucket, tl.true_t60  AS true_array, mp.is_t60_qualified  AS qualified),
-        STRUCT('T60_180' AS time_bucket, tl.true_t180 AS true_array, mp.is_t180_qualified AS qualified)
+        STRUCT('T0_30'   AS time_bucket, (SELECT ARRAY_AGG(CAST(x AS STRING)) FROM UNNEST(tl.true_t30)  x) AS true_array, mp.is_t30_qualified  AS qualified),
+        STRUCT('T30_60'  AS time_bucket, (SELECT ARRAY_AGG(CAST(x AS STRING)) FROM UNNEST(tl.true_t60)  x) AS true_array, mp.is_t60_qualified  AS qualified),
+        STRUCT('T60_180' AS time_bucket, (SELECT ARRAY_AGG(CAST(x AS STRING)) FROM UNNEST(tl.true_t180) x) AS true_array, mp.is_t180_qualified AS qualified)
     ]) AS window
     WHERE window.qualified = TRUE
       AND ARRAY_LENGTH(window.true_array) > 0
