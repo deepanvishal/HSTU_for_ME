@@ -1,0 +1,202 @@
+-- ============================================================
+-- SQL_PMA_04 — PROVIDER-LEVEL SUMMARY (Mandatory 5b)
+-- Purpose : For each provider — overall prediction reliability
+--           Two directions:
+--             Outbound: from_provider — member leaving this provider,
+--                       how well do we predict their next destination
+--             Inbound:  predicted_provider — how often is this provider
+--                       correctly predicted as the next destination
+-- Grain   : (provider_direction, srv_prvdr_id, model, time_bucket)
+-- Sources : A870800_gen_rec_provider_eval_5pct            SQL_05
+--           A870800_gen_rec_provider_model_test_agg_5pct  SQL_02
+--           A870800_gen_rec_provider_vocab                SQL_01
+--           A870800_gen_rec_provider_name_lookup          SQL_PMA_00
+--           A870800_gen_rec_provider_primary_specialty    SQL_01b
+--           edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP
+-- Deduplication:
+--   eval grain: (member_id, trigger_date, trigger_dx, member_segment,
+--                time_bucket, model)
+--   test_agg: one row per trigger — many-to-one join for from_provider, safe
+--   QUALIFY ROW_NUMBER()=1 handles rare multiple from_provider per trigger
+--   Inbound: UNNEST top5_predictions — each position is one prediction event
+--            pred_pos=score_pos alignment prevents cross-join duplication
+-- ============================================================
+
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_pma_provider_summary_5pct`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+
+WITH
+
+-- 1. Add from_provider to eval via test_agg — one row per trigger per window per model
+eval_with_from AS (
+    SELECT
+        CAST(e.member_id      AS STRING)                 AS member_id
+        ,CAST(e.trigger_date  AS STRING)                 AS trigger_date
+        ,CAST(e.trigger_dx    AS STRING)                 AS trigger_dx
+        ,CAST(e.member_segment AS STRING)                AS member_segment
+        ,e.time_bucket
+        ,e.model
+        ,e.top5_predictions
+        ,e.top5_scores
+        ,e.true_labels
+        ,e.tp
+        ,e.fp
+        ,e.fn
+        ,e.hit_at_1
+        ,e.hit_at_3
+        ,e.hit_at_5
+        ,e.ndcg_at_1
+        ,e.ndcg_at_3
+        ,e.ndcg_at_5
+        ,e.precision_at_3
+        ,e.recall_at_3
+        ,CAST(t.from_provider AS STRING)                 AS from_provider
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_eval_5pct` e
+    INNER JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_model_test_agg_5pct` t
+        ON  CAST(e.member_id      AS STRING) = CAST(t.member_id      AS STRING)
+        AND CAST(e.trigger_date   AS STRING) = CAST(t.trigger_date   AS STRING)
+        AND CAST(e.trigger_dx     AS STRING) = CAST(t.trigger_dx     AS STRING)
+        AND CAST(e.member_segment AS STRING) = CAST(t.member_segment AS STRING)
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY CAST(e.member_id AS STRING), CAST(e.trigger_date AS STRING),
+                     CAST(e.trigger_dx AS STRING), CAST(e.member_segment AS STRING),
+                     e.time_bucket, e.model
+        ORDER BY CAST(t.from_provider AS STRING)
+    ) = 1
+),
+
+-- 2. OUTBOUND — aggregate at from_provider level
+--    Each row in eval_with_from = one trigger event for this from_provider
+outbound_raw AS (
+    SELECT
+        from_provider                                    AS srv_prvdr_id
+        ,'Outbound'                                      AS provider_direction
+        ,model
+        ,time_bucket
+        ,COUNT(*)                                        AS n_triggers
+        ,SUM(tp)                                         AS total_tp
+        ,SUM(fp)                                         AS total_fp
+        ,SUM(fn)                                         AS total_fn
+        ,ROUND(AVG(hit_at_1), 4)                         AS hit_at_1
+        ,ROUND(AVG(hit_at_3), 4)                         AS hit_at_3
+        ,ROUND(AVG(hit_at_5), 4)                         AS hit_at_5
+        ,ROUND(AVG(ndcg_at_1), 4)                        AS ndcg_at_1
+        ,ROUND(AVG(ndcg_at_3), 4)                        AS ndcg_at_3
+        ,ROUND(AVG(ndcg_at_5), 4)                        AS ndcg_at_5
+        ,ROUND(AVG(precision_at_3), 4)                   AS precision_at_3
+        ,ROUND(AVG(recall_at_3), 4)                      AS recall_at_3
+        ,ROUND(SUM(tp) / NULLIF(SUM(tp) + SUM(fp), 0), 4) AS overall_precision
+        ,ROUND(SUM(tp) / NULLIF(SUM(tp) + SUM(fn), 0), 4) AS overall_recall
+    FROM eval_with_from
+    WHERE from_provider IS NOT NULL
+    GROUP BY from_provider, model, time_bucket
+),
+
+-- 3. INBOUND — explode top5_predictions, aggregate at predicted_provider level
+--    Each predicted provider per trigger per window per model = one prediction event
+--    is_correct = 1 if this provider appears in true_labels for this trigger
+inbound_exploded AS (
+    SELECT
+        CAST(pred_provider AS STRING)                    AS srv_prvdr_id
+        ,ef.model
+        ,ef.time_bucket
+        ,CAST(pred_score AS FLOAT64)                     AS pred_score
+        ,IF(CONCAT('|', ef.true_labels, '|')
+            LIKE CONCAT('%|', CAST(pred_provider AS STRING), '|%'),
+            1, 0)                                        AS is_correct
+    FROM eval_with_from ef
+    CROSS JOIN UNNEST(SPLIT(ef.top5_predictions, '|')) AS pred_provider
+        WITH OFFSET pred_pos
+    CROSS JOIN UNNEST(SPLIT(ef.top5_scores, '|'))      AS pred_score
+        WITH OFFSET score_pos
+    WHERE pred_pos = score_pos
+      AND CAST(pred_provider AS STRING) != ''
+      AND pred_provider IS NOT NULL
+),
+
+inbound_raw AS (
+    SELECT
+        srv_prvdr_id
+        ,'Inbound'                                       AS provider_direction
+        ,model
+        ,time_bucket
+        ,COUNT(*)                                        AS n_triggers       -- times predicted
+        ,SUM(is_correct)                                 AS total_tp
+        ,(COUNT(*) - SUM(is_correct))                    AS total_fp
+        ,NULL                                            AS total_fn         -- FN not meaningful for inbound
+        ,NULL                                            AS hit_at_1
+        ,NULL                                            AS hit_at_3
+        ,NULL                                            AS hit_at_5
+        ,NULL                                            AS ndcg_at_1
+        ,NULL                                            AS ndcg_at_3
+        ,NULL                                            AS ndcg_at_5
+        ,NULL                                            AS precision_at_3
+        ,NULL                                            AS recall_at_3
+        ,ROUND(SUM(is_correct) / NULLIF(COUNT(*), 0), 4) AS overall_precision  -- TP / (TP+FP)
+        ,NULL                                            AS overall_recall
+    FROM inbound_exploded
+    GROUP BY srv_prvdr_id, model, time_bucket
+),
+
+-- 4. Union outbound + inbound
+combined AS (
+    SELECT * FROM outbound_raw
+    UNION ALL
+    SELECT * FROM inbound_raw
+),
+
+-- 5. Rank within each (direction, model, time_bucket) by hit_at_3 (outbound)
+--    or overall_precision (inbound)
+ranked AS (
+    SELECT
+        *
+        ,ROW_NUMBER() OVER (
+            PARTITION BY provider_direction, model, time_bucket
+            ORDER BY COALESCE(hit_at_3, overall_precision) DESC
+        )                                                AS accuracy_rank
+    FROM combined
+)
+
+-- 6. Enrich with provider name, specialty, vocab stats
+SELECT
+    r.provider_direction
+    ,CAST(r.srv_prvdr_id AS STRING)                      AS srv_prvdr_id
+    ,COALESCE(n.provider_name, CAST(r.srv_prvdr_id AS STRING)) AS provider_name
+    ,COALESCE(ps.primary_specialty, 'Unknown')           AS primary_specialty
+    ,COALESCE(gl.global_lookup_desc, 'Unknown')          AS specialty_desc
+    ,r.model
+    ,r.time_bucket
+    ,r.n_triggers
+    ,COALESCE(v.outbound_count, 0)                       AS total_outbound_transitions
+    ,COALESCE(v.inbound_count,  0)                       AS total_inbound_transitions
+    ,COALESCE(v.is_top80, FALSE)                         AS is_top80
+    ,r.total_tp
+    ,r.total_fp
+    ,r.total_fn
+    ,r.hit_at_1
+    ,r.hit_at_3
+    ,r.hit_at_5
+    ,r.ndcg_at_3
+    ,r.ndcg_at_5
+    ,r.precision_at_3
+    ,r.recall_at_3
+    ,r.overall_precision
+    ,r.overall_recall
+    ,r.accuracy_rank
+FROM ranked r
+LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_name_lookup` n
+    ON CAST(r.srv_prvdr_id AS STRING) = CAST(n.srv_prvdr_id AS STRING)
+LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_primary_specialty` ps
+    ON CAST(r.srv_prvdr_id AS STRING) = CAST(ps.srv_prvdr_id AS STRING)
+LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.GLOBAL_LOOKUP` gl
+    ON gl.global_lookup_cd = ps.primary_specialty
+    AND LOWER(gl.lookup_column_nm) = 'specialty_ctg_cd'
+LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_vocab` v
+    ON CAST(r.srv_prvdr_id AS STRING) = CAST(v.srv_prvdr_id AS STRING)
+ORDER BY
+    r.provider_direction
+    ,r.time_bucket
+    ,r.model
+    ,r.accuracy_rank
+;
