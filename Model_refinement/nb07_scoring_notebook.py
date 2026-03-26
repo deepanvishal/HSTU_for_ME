@@ -43,7 +43,7 @@ DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
 RUN_TS       = datetime.now().strftime("%Y-%m-%d %H:%M")
 
 WRITE_BQ     = True       # set False to skip BQ writes
-PRINT_EVERY  = 500        # print progress every N batches
+PRINT_EVERY  = 100        # print progress every N batches
 
 DS           = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
 CACHE_DIR    = f"./cache_provider_{SAMPLE}"
