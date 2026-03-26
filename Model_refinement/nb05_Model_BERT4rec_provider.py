@@ -468,19 +468,39 @@ def metrics_at_k(scores, labels_multihot, k):
 
 def evaluate(loader, mdl):
     mdl.eval()
-    buckets = {"T0_30": ("is_t30", "lab_t30"),
-               "T30_60": ("is_t60", "lab_t60"),
-               "T60_180": ("is_t180", "lab_t180")}
+    model_raw  = get_raw(mdl)
+    buckets    = {"T0_30":  ("is_t30",  "lab_t30"),
+                  "T30_60": ("is_t60",  "lab_t60"),
+                  "T60_180":("is_t180", "lab_t180")}
     all_metrics = {b: {k: {"hit":[],"prec":[],"rec":[],"ndcg":[]}
                         for k in K_VALUES} for b in buckets}
+    val_loss_sum, val_loss_n = 0.0, 0
+
     with torch.no_grad():
         for batch in loader:
-            seq     = batch["seq"].to(DEVICE, non_blocking=True)
-            trigger = batch["trigger"].to(DEVICE, non_blocking=True)
+            seq     = batch["seq"].to(DEVICE,         non_blocking=True)
+            trigger = batch["trigger"].to(DEVICE,     non_blocking=True)
             tm      = batch["target_mask"].to(DEVICE, non_blocking=True)
+            hard_negs_list = batch["hard_negs"]
+            B = seq.shape[0]
+
             with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
-                scores, _ = mdl(seq, trigger, tm)
-            B = scores.shape[0]
+                scores, user_repr = mdl(seq, trigger, tm)
+
+            # Val loss
+            neg_matrix = build_neg_matrix(B, hard_negs_list,
+                                          PROVIDER_VOCAB_SIZE,
+                                          NEG_K, HARD_NEG_K, DEVICE)
+            for flag_key, lab_key in [("is_t30","lab_t30"),("is_t60","lab_t60"),("is_t180","lab_t180")]:
+                flag = batch[flag_key].to(DEVICE)
+                if flag.sum() == 0: continue
+                labs = batch[lab_key].to(DEVICE)
+                wl   = batched_infonce_loss(user_repr[flag], labs[flag],
+                                            neg_matrix[flag], model_raw)
+                val_loss_sum += wl.item()
+                val_loss_n   += 1
+
+            # Ranking metrics
             pad_scores  = torch.zeros(B, 2, device=scores.device)
             full_scores = torch.cat([pad_scores, scores], dim=1)
             for bucket, (flag_key, lab_key) in buckets.items():
@@ -493,7 +513,8 @@ def evaluate(loader, mdl):
                     m = metrics_at_k(s_m, l_m, k)
                     for metric, val in m.items():
                         all_metrics[bucket][k][metric].append(val)
-    results = {}
+
+    results = {"val_loss": round(val_loss_sum / max(val_loss_n, 1), 4)}
     for bucket in buckets:
         for k in K_VALUES:
             for metric in ["hit", "prec", "rec", "ndcg"]:
@@ -580,14 +601,15 @@ for epoch in range(EPOCHS):
         scaler.step(optimizer)
         scaler.update()
 
+        scheduler.step()   # per-batch step for warmup + cosine
         total_loss += loss.item()
         n_batches  += 1
 
         if (batch_idx + 1) % 100 == 0:
+            current_lr = scheduler.get_last_lr()[0]
             print(f"  Ep {epoch+1} | B {batch_idx+1}/{len(train_loader)} | "
-                  f"Loss: {total_loss/n_batches:.4f}")
+                  f"Train Loss (avg): {total_loss/n_batches:.4f} | LR: {current_lr:.2e}")
 
-    scheduler.step()
     avg_loss = total_loss / max(n_batches, 1)
     ep_time  = time.time() - t_ep
     print(f"  Epoch {epoch+1} done — loss={avg_loss:.4f} | time={ep_time:.0f}s")
@@ -596,13 +618,15 @@ for epoch in range(EPOCHS):
     val_ndcg    = np.mean([val_metrics.get(f"T0_30_ndcg@{k}", 0) for k in K_VALUES])
     print_metrics(val_metrics, f"Val Epoch {epoch+1}")
 
-    train_log.append({"epoch": epoch+1, "loss": avg_loss,
+    val_loss = val_metrics.get("val_loss", 0.0)
+    train_log.append({"epoch": epoch+1,
+                       "train_loss": avg_loss, "val_loss": val_loss,
                        "val_ndcg_t30": val_ndcg, **val_metrics})
 
     display(Markdown(
-        f"**Epoch {epoch+1}/{EPOCHS}** — "
-        f"Loss: {avg_loss:.4f} | Val NDCG@T30: {val_ndcg:.4f} | "
-        f"Time: {ep_time:.0f}s"
+        f"**Epoch {epoch+1}/{EPOCHS}** | "
+        f"Train Loss: `{avg_loss:.4f}` | Val Loss: `{val_loss:.4f}` | "
+        f"Val NDCG@T30: `{val_ndcg:.4f}` | Time: {ep_time:.0f}s"
     ))
 
     if val_ndcg >= best_ndcg:
