@@ -64,6 +64,13 @@ markov_preds_agg AS (
             ORDER BY mp.prediction_rank
             LIMIT 5
         )                                                AS pred_array
+        ,ARRAY_TO_STRING(
+            ARRAY_AGG(
+                CAST(ROUND(mp.probability, 4) AS STRING)
+                ORDER BY mp.prediction_rank
+                LIMIT 5
+            ), '|'
+         )                                               AS top5_scores
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_provider_markov_predictions_5pct` mp
     WHERE mp.predicted_provider IS NOT NULL
     GROUP BY
@@ -99,11 +106,12 @@ markov_rows AS (
         ,'Markov'                                        AS model
         ,'5pct'                                          AS sample
         ,CURRENT_TIMESTAMP()                             AS run_timestamp
-        ,window.time_bucket
+        ,w.time_bucket
         ,mp.pred_array
-        ,window.true_array
+        ,w.true_array
         ,ARRAY_TO_STRING(mp.pred_array, '|')             AS top5_predictions
-        ,ARRAY_TO_STRING(window.true_array, '|')         AS true_labels
+        ,mp.top5_scores                                  AS top5_scores
+        ,ARRAY_TO_STRING(w.true_array, '|')              AS true_labels
     FROM markov_preds_agg mp
     JOIN true_labels_all tl
         ON  mp.member_id      = tl.member_id
@@ -115,9 +123,9 @@ markov_rows AS (
         STRUCT('T0_30'   AS time_bucket, (SELECT ARRAY_AGG(CAST(x AS STRING)) FROM UNNEST(tl.true_t30)  x) AS true_array, mp.is_t30_qualified  AS qualified),
         STRUCT('T30_60'  AS time_bucket, (SELECT ARRAY_AGG(CAST(x AS STRING)) FROM UNNEST(tl.true_t60)  x) AS true_array, mp.is_t60_qualified  AS qualified),
         STRUCT('T60_180' AS time_bucket, (SELECT ARRAY_AGG(CAST(x AS STRING)) FROM UNNEST(tl.true_t180) x) AS true_array, mp.is_t180_qualified AS qualified)
-    ]) AS window
-    WHERE window.qualified = TRUE
-      AND ARRAY_LENGTH(window.true_array) > 0
+    ]) AS w
+    WHERE w.qualified = TRUE
+      AND ARRAY_LENGTH(w.true_array) > 0
 ),
 
 -- ── STEP 5: Union DL + Markov into one unified table ─────────────────────
@@ -135,6 +143,7 @@ all_predictions AS (
         ,pred_array
         ,true_array
         ,top5_predictions
+        ,top5_scores
         ,true_labels
     FROM dl_predictions
 
@@ -153,6 +162,7 @@ all_predictions AS (
         ,pred_array
         ,true_array
         ,top5_predictions
+        ,top5_scores
         ,true_labels
     FROM markov_rows
 ),
