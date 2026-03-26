@@ -397,11 +397,34 @@ def metrics_at_k(scores, labels_multihot, k):
 # Runs one model over full test set, returns metrics + per-trigger rows for BQ
 # ══════════════════════════════════════════════════════════════════════════════
 
-def score_model(model, loader, model_name, mask_idx=None):
+# BQ schema and job config — defined once, reused across all models
+_BQ_SCHEMA = [
+    bigquery.SchemaField("member_id",        "STRING"),
+    bigquery.SchemaField("trigger_date",     "STRING"),
+    bigquery.SchemaField("trigger_dx",       "STRING"),
+    bigquery.SchemaField("member_segment",   "STRING"),
+    bigquery.SchemaField("time_bucket",      "STRING"),
+    bigquery.SchemaField("true_labels",      "STRING"),
+    bigquery.SchemaField("top5_predictions", "STRING"),
+    bigquery.SchemaField("top5_scores",      "STRING"),
+    bigquery.SchemaField("model",            "STRING"),
+    bigquery.SchemaField("sample",           "STRING"),
+    bigquery.SchemaField("run_timestamp",    "STRING"),
+]
+_BQ_JOB_CFG = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", schema=_BQ_SCHEMA)
+_BQ_TABLE   = f"{DS}.A870800_gen_rec_provider_trigger_scores"
+_BQ_FLUSH_EVERY = 50_000   # flush to BQ every 50K rows — keeps RAM low
+
+def flush_to_bq(rows):
+    if not rows: return
+    chunk = pd.DataFrame(rows)
+    client.load_table_from_dataframe(chunk, _BQ_TABLE, job_config=_BQ_JOB_CFG).result()
+
+def score_model(model, loader, model_name, mask_idx=None, write_bq=True):
     """
     Score a model on the test set.
-    Returns (metrics_dict, rows_for_bq)
-    rows_for_bq: list of dicts with top5 predictions per trigger per window
+    Streams BQ rows in chunks of 50K — no large RAM accumulation.
+    Returns metrics_dict.
     """
     model.eval()
     buckets    = {"T0_30":  ("is_t30","lab_t30"),
@@ -410,7 +433,7 @@ def score_model(model, loader, model_name, mask_idx=None):
     all_metrics = {b: {k: {"hit":[],"prec":[],"rec":[],"ndcg":[]}
                         for k in K_VALUES} for b in buckets}
     bq_rows    = []
-    MASK_IDX   = mask_idx  # only for BERT4Rec
+    MASK_IDX   = mask_idx
 
     is_bert    = (model_name == "BERT4Rec")
     is_hstu    = (model_name == "HSTU")
@@ -487,6 +510,16 @@ def score_model(model, loader, model_name, mask_idx=None):
                         "run_timestamp":    str(RUN_TS),
                     })
 
+        # Stream BQ rows every 50K — keeps RAM bounded
+        if write_bq and len(bq_rows) >= _BQ_FLUSH_EVERY:
+            flush_to_bq(bq_rows)
+            bq_rows = []
+
+    # Final flush
+    if write_bq and bq_rows:
+        flush_to_bq(bq_rows)
+        bq_rows = []
+
     # Aggregate metrics
     results = {}
     for bucket in buckets:
@@ -495,7 +528,7 @@ def score_model(model, loader, model_name, mask_idx=None):
                 vals = all_metrics[bucket][k][metric]
                 if vals:
                     results[f"{bucket}_{metric}@{k}"] = round(np.mean(vals), 4)
-    return results, bq_rows
+    return results
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -505,7 +538,6 @@ t0 = time.time()
 display(Markdown("---\n## Section 6 — Score Models"))
 
 all_model_metrics = {}
-all_bq_rows       = []
 
 
 def load_latest_checkpoint(pattern):
@@ -535,9 +567,8 @@ if ckpt_path:
     ).to(DEVICE)
     sasrec.load_state_dict(ckpt["model_state"])
     t1 = time.time()
-    metrics_s, rows_s = score_model(sasrec, test_loader, "SASRec")
+    metrics_s = score_model(sasrec, test_loader, "SASRec")
     all_model_metrics["SASRec"] = metrics_s
-    all_bq_rows.extend(rows_s)
     print(f"SASRec scored — {time.time()-t1:.0f}s | T30 NDCG@3: {metrics_s.get('T0_30_ndcg@3',0):.4f}")
     del sasrec; gc.collect()
     if torch.cuda.is_available(): torch.cuda.empty_cache()
@@ -564,9 +595,8 @@ if ckpt_path:
     bert4rec.load_state_dict(ckpt["model_state"])
     MASK_IDX = cfg["mask_idx"]
     t1 = time.time()
-    metrics_b, rows_b = score_model(bert4rec, test_loader, "BERT4Rec", mask_idx=MASK_IDX)
+    metrics_b = score_model(bert4rec, test_loader, "BERT4Rec", mask_idx=MASK_IDX)
     all_model_metrics["BERT4Rec"] = metrics_b
-    all_bq_rows.extend(rows_b)
     print(f"BERT4Rec scored — {time.time()-t1:.0f}s | T30 NDCG@3: {metrics_b.get('T0_30_ndcg@3',0):.4f}")
     del bert4rec; gc.collect()
     if torch.cuda.is_available(): torch.cuda.empty_cache()
@@ -599,9 +629,8 @@ if ckpt_path:
     ).to(DEVICE)
     hstu.load_state_dict(ckpt["model_state"])
     t1 = time.time()
-    metrics_h, rows_h = score_model(hstu, test_loader, "HSTU")
+    metrics_h = score_model(hstu, test_loader, "HSTU")
     all_model_metrics["HSTU"] = metrics_h
-    all_bq_rows.extend(rows_h)
     print(f"HSTU scored — {time.time()-t1:.0f}s | T30 NDCG@3: {metrics_h.get('T0_30_ndcg@3',0):.4f}")
     del hstu; gc.collect()
     if torch.cuda.is_available(): torch.cuda.empty_cache()
@@ -732,46 +761,12 @@ display(Markdown(f"""
 print(f"Section 8 done — {time.time()-t0:.1f}s")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — WRITE TRIGGER SCORES TO BQ
-# ══════════════════════════════════════════════════════════════════════════════
-t0 = time.time()
-display(Markdown("---\n## Section 9 — Write Scores to BQ"))
-
-print(f"Writing {len(all_bq_rows):,} trigger-window rows to BQ...")
-
-schema = [
-    bigquery.SchemaField("member_id",        "STRING"),
-    bigquery.SchemaField("trigger_date",     "STRING"),
-    bigquery.SchemaField("trigger_dx",       "STRING"),
-    bigquery.SchemaField("member_segment",   "STRING"),
-    bigquery.SchemaField("time_bucket",      "STRING"),
-    bigquery.SchemaField("true_labels",      "STRING"),
-    bigquery.SchemaField("top5_predictions", "STRING"),
-    bigquery.SchemaField("top5_scores",      "STRING"),
-    bigquery.SchemaField("model",            "STRING"),
-    bigquery.SchemaField("sample",           "STRING"),
-    bigquery.SchemaField("run_timestamp",    "STRING"),
-]
-job_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", schema=schema)
-
-BATCH_BQ = 100_000
-for start in range(0, len(all_bq_rows), BATCH_BQ):
-    chunk = pd.DataFrame(all_bq_rows[start:start + BATCH_BQ])
-    client.load_table_from_dataframe(
-        chunk,
-        f"{DS}.A870800_gen_rec_provider_trigger_scores",
-        job_config=job_cfg,
-    ).result()
-    print(f"  Written {start:,} → {min(start+BATCH_BQ, len(all_bq_rows)):,}")
-
-print(f"Section 9 done — {time.time()-t0:.1f}s")
-display(Markdown(f"**BQ rows written:** {len(all_bq_rows):,} | **Table:** A870800_gen_rec_provider_trigger_scores"))
+# BQ rows streamed inline during scoring — no Section 9 needed
 
 
 # ── CLEANUP ───────────────────────────────────────────────────────────────────
 import gc
-for var in ["test_data","all_bq_rows","comparison_df"]:
+for var in ["test_data","comparison_df"]:
     if var in dir(): del globals()[var]
 gc.collect()
 if torch.cuda.is_available():
