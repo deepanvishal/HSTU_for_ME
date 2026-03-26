@@ -466,11 +466,11 @@ def score_model(model, loader, model_name, mask_idx=None):
                 for bucket, (flag_key, lab_key) in buckets.items():
                     if not batch[flag_key][i].item():
                         continue
-                    top5_providers = [idx_to_provider.get(int(idx), "UNK")
+                    top5_providers = [str(idx_to_provider.get(idx, idx))
                                       for idx in top5_idx_cpu[i].tolist()]
                     top5_sc        = [round(float(v), 4) for v in top5_vals_cpu[i]]
                     true_ids       = batch[lab_key][i].nonzero(as_tuple=True)[0].tolist()
-                    true_providers = [str(idx_to_provider.get(int(idx), "UNK")) for idx in true_ids]
+                    true_providers = [str(idx_to_provider.get(idx, idx)) for idx in true_ids]
                     top5_providers_str = [str(p) for p in top5_providers]
 
                     bq_rows.append({
@@ -479,8 +479,8 @@ def score_model(model, loader, model_name, mask_idx=None):
                         "trigger_dx":       str(batch["trigger_dxs"][i]),
                         "member_segment":   str(batch["segments"][i]),
                         "time_bucket":      str(bucket),
-                        "true_labels":      "|".join(sorted(true_providers)),
-                        "top5_predictions": "|".join(top5_providers_str),
+                        "true_labels":      "|".join(sorted(str(p) for p in true_providers)),
+                        "top5_predictions": "|".join(str(p) for p in top5_providers_str),
                         "top5_scores":      "|".join(str(s) for s in top5_sc),
                         "model":            str(model_name),
                         "sample":           str(SAMPLE),
