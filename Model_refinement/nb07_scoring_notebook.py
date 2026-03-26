@@ -38,9 +38,12 @@ MAX_SEQ_LEN  = 20
 PAD_IDX      = 0
 UNK_IDX      = 1
 K_VALUES     = [1, 3, 5]
-BATCH_SIZE   = 512       # smaller for scoring — score tensor (B, 31K) is large
+BATCH_SIZE   = 1024      # inference only — no gradients, safe to go larger
 DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
 RUN_TS       = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+WRITE_BQ     = True       # set False to skip BQ writes
+PRINT_EVERY  = 500        # print progress every N batches
 
 DS           = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
 CACHE_DIR    = f"./cache_provider_{SAMPLE}"
@@ -438,8 +441,9 @@ def score_model(model, loader, model_name, mask_idx=None, write_bq=True):
     is_bert    = (model_name == "BERT4Rec")
     is_hstu    = (model_name == "HSTU")
 
+    t_score_start = time.time()
     with torch.no_grad():
-        for batch in loader:
+        for batch_idx, batch in enumerate(loader):
             seq     = batch["seq"].to(DEVICE,     non_blocking=True)
             delta_t = batch["delta_t"].to(DEVICE, non_blocking=True)
             trigger = batch["trigger"].to(DEVICE, non_blocking=True)
@@ -510,14 +514,25 @@ def score_model(model, loader, model_name, mask_idx=None, write_bq=True):
                         "run_timestamp":    str(RUN_TS),
                     })
 
-        # Stream BQ rows every 50K — keeps RAM bounded
+        # Progress print
+        if (batch_idx + 1) % PRINT_EVERY == 0:
+            elapsed = time.time() - t_score_start
+            rate    = (batch_idx + 1) * BATCH_SIZE / max(elapsed, 1)
+            eta     = (len(loader) - batch_idx - 1) * BATCH_SIZE / max(rate, 1)
+            print(f"  {model_name} | B {batch_idx+1}/{len(loader)} | "
+                  f"{rate/1000:.1f}K triggers/s | ETA {eta/60:.1f}min | "
+                  f"BQ buffered: {len(bq_rows):,}")
+
+        # Stream BQ rows every 50K
         if write_bq and len(bq_rows) >= _BQ_FLUSH_EVERY:
             flush_to_bq(bq_rows)
+            print(f"  → Flushed {_BQ_FLUSH_EVERY:,} rows to BQ")
             bq_rows = []
 
     # Final flush
     if write_bq and bq_rows:
         flush_to_bq(bq_rows)
+        print(f"  → Final flush: {len(bq_rows):,} rows to BQ")
         bq_rows = []
 
     # Aggregate metrics
@@ -567,7 +582,7 @@ if ckpt_path:
     ).to(DEVICE)
     sasrec.load_state_dict(ckpt["model_state"])
     t1 = time.time()
-    metrics_s = score_model(sasrec, test_loader, "SASRec")
+    metrics_s = score_model(sasrec, test_loader, "SASRec", write_bq=WRITE_BQ)
     all_model_metrics["SASRec"] = metrics_s
     print(f"SASRec scored — {time.time()-t1:.0f}s | T30 NDCG@3: {metrics_s.get('T0_30_ndcg@3',0):.4f}")
     del sasrec; gc.collect()
@@ -595,7 +610,7 @@ if ckpt_path:
     bert4rec.load_state_dict(ckpt["model_state"])
     MASK_IDX = cfg["mask_idx"]
     t1 = time.time()
-    metrics_b = score_model(bert4rec, test_loader, "BERT4Rec", mask_idx=MASK_IDX)
+    metrics_b = score_model(bert4rec, test_loader, "BERT4Rec", mask_idx=MASK_IDX, write_bq=WRITE_BQ)
     all_model_metrics["BERT4Rec"] = metrics_b
     print(f"BERT4Rec scored — {time.time()-t1:.0f}s | T30 NDCG@3: {metrics_b.get('T0_30_ndcg@3',0):.4f}")
     del bert4rec; gc.collect()
@@ -629,7 +644,7 @@ if ckpt_path:
     ).to(DEVICE)
     hstu.load_state_dict(ckpt["model_state"])
     t1 = time.time()
-    metrics_h = score_model(hstu, test_loader, "HSTU")
+    metrics_h = score_model(hstu, test_loader, "HSTU", write_bq=WRITE_BQ)
     all_model_metrics["HSTU"] = metrics_h
     print(f"HSTU scored — {time.time()-t1:.0f}s | T30 NDCG@3: {metrics_h.get('T0_30_ndcg@3',0):.4f}")
     del hstu; gc.collect()
