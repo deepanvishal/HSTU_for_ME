@@ -375,7 +375,7 @@ class HSTUProvider(nn.Module):
             )
             for _ in range(num_blocks)
         ])
-        self.out_norm = nn.LayerNorm(d_model)
+        self.out_norm = nn.LayerNorm(hstu_dim)  # hstu_dim=160 after delta_t concat
 
         self.register_buffer(
             '_causal_mask',
