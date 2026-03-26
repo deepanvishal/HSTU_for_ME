@@ -467,9 +467,9 @@ def score_model(model, loader, model_name, mask_idx=None):
                     if not batch[flag_key][i].item():
                         continue
                     top5_providers = [idx_to_provider.get(int(idx), "UNK")
-                                      for idx in top5_idx_cpu[i]]
+                                      for idx in top5_idx_cpu[i].tolist()]
                     top5_sc        = [round(float(v), 4) for v in top5_vals_cpu[i]]
-                    true_ids       = batch[lab_key][i].nonzero(as_tuple=True)[0].numpy()
+                    true_ids       = batch[lab_key][i].nonzero(as_tuple=True)[0].tolist()
                     true_providers = [idx_to_provider.get(int(idx), "UNK") for idx in true_ids]
 
                     bq_rows.append({
