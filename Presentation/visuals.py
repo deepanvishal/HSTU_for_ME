@@ -19,6 +19,7 @@ import numpy as np
 import os
 from google.cloud import bigquery
 from IPython.display import display, Markdown
+from matplotlib.ticker import FuncFormatter
 
 DS = "anbc-hcb-dev.provider_ds_netconf_data_hcb_dev"
 client = bigquery.Client(project="anbc-hcb-dev")
@@ -601,6 +602,7 @@ ax.axvline(med_spend, color=GRID_CLR, linestyle="--", linewidth=1)
 ax.axhline(avg_hit * 100, color=GRID_CLR, linestyle="--", linewidth=1)
 
 ax.set_xscale("log")
+ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"${x:.1f}B"))
 ax.set_xlabel("Next Visit (V2) Allowed Amount ($B, log scale)")
 ax.set_ylabel("Inbound Hit@5 at T30 (%)")
 ax.yaxis.set_major_formatter(mticker.PercentFormatter())
@@ -619,9 +621,19 @@ plt.show()
 display(Markdown("---\n## VIS-EXTRA: Consistency Heatmap"))
 
 import seaborn as sns
-seg_pivot = perf_seg[perf_seg["member_segment"] != "Unknown"].pivot(
-    index="model", columns="member_segment", values="hit_at_5"
+
+perf_seg["member_segment"] = perf_seg["member_segment"].replace({
+    "Adult_Female": "Adult Female",
+    "Adult_Male": "Adult Male",
+})
+perf_seg = perf_seg.rename(columns={"member_segment": "Member Segment"})
+seg_pivot = perf_seg[perf_seg["Member Segment"] != "Unknown"].pivot(
+    index="model", columns="Member Segment", values="hit_at_5"
 ).reindex(MODELS) * 100
+
+# seg_pivot = perf_seg[perf_seg["member_segment"] != "Unknown"].pivot(
+#     index="model", columns="member_segment", values="hit_at_5"
+# ).reindex(MODELS) * 100
 
 fig, ax = plt.subplots(figsize=(8, 3.5))
 sns.heatmap(seg_pivot, annot=True, fmt=".1f", cmap="YlGn",
