@@ -40,6 +40,29 @@ level2 = client.query(f"""
 L2_SPEND = f"${float(level2['trigger_day_spend']) / 1e9:.1f}B"
 L2_CLAIMS = f"{float(level2['trigger_day_claims']):,.0f}"
 
+# ── Level 2b: Trigger dx spend (trigger date + matching dx) ───
+level2b = client.query(f"""
+    WITH trigger_dx_pairs AS (
+        SELECT DISTINCT
+            member_id
+            ,trigger_date
+            ,trigger_dx
+        FROM `{DS}.A870800_gen_rec_triggers_qualified`
+        WHERE is_left_qualified = TRUE
+    )
+    SELECT
+        SUM(CAST(c.allowed_amt AS FLOAT64))              AS trigger_dx_spend
+        ,COUNT(*)                                        AS trigger_dx_claims
+    FROM trigger_dx_pairs t
+    JOIN `{DS}.A870800_claims_gen_rec_2022_2025_sfl` c
+        ON t.member_id = c.member_id
+        AND t.trigger_date = c.srv_start_dt
+        AND REPLACE(TRIM(c.pri_icd9_dx_cd), '.', '') = t.trigger_dx
+""").to_dataframe().iloc[0]
+
+L2B_SPEND = f"${float(level2b['trigger_dx_spend']) / 1e9:.1f}B"
+L2B_CLAIMS = f"{float(level2b['trigger_dx_claims']):,.0f}"
+
 # ── Level 3: Immediate next visit (V2) spend ──────────────────
 level3 = client.query(f"""
     WITH v2_dates AS (
@@ -105,9 +128,10 @@ display(Markdown(f"""
 | Level | Description | Spend | Claims |
 |---|---|---|---|
 | 1 | All claims in dataset | {L1_SPEND} | {L1_CLAIMS} |
-| 2 | Trigger-day claims | {L2_SPEND} | {L2_CLAIMS} |
-| 3 | Immediate next visit (V2) claims | {L3_SPEND} | {L3_CLAIMS} |
-| 4 | All claims within T180 of trigger (approx) | {L4_SPEND} | {L4_CLAIMS} |
+| 2 | Trigger-day claims (all dx on trigger date) | {L2_SPEND} | {L2_CLAIMS} |
+| 3 | Trigger dx claims (trigger date + matching dx) | {L2B_SPEND} | {L2B_CLAIMS} |
+| 4 | Immediate next visit (V2) claims | {L3_SPEND} | {L3_CLAIMS} |
+| 5 | All claims within T180 of trigger (approx) | {L4_SPEND} | {L4_CLAIMS} |
 """))
 
 print("Block 6a done.")
