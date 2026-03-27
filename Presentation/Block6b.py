@@ -84,7 +84,30 @@ display(seg_pivot.round(4))
 # 3b. Hit@5 by diagnosis volume tier
 display(Markdown("---\n### 3b. Consistency — Hit@5 by Diagnosis Volume Tier (T30)"))
 dx_consistency = client.query(f"""
-    WITH volume_tiers AS (
+    WITH all_scores AS (
+        SELECT model, trigger_dx, hit_at_5, true_labels
+        FROM `{DS}.A870800_gen_rec_trigger_scores`
+        WHERE time_bucket = 'T0_30'
+          AND true_labels IS NOT NULL AND true_labels != ''
+          AND top5_predictions IS NOT NULL AND top5_predictions != ''
+        UNION ALL
+        SELECT model, trigger_dx, hit_at_5, true_labels
+        FROM `{DS}.A870800_gen_rec_markov_trigger_scores_5pct`
+        WHERE time_bucket = 'T0_30'
+          AND true_labels IS NOT NULL AND true_labels != ''
+          AND top5_predictions IS NOT NULL AND top5_predictions != ''
+    ),
+    by_dx AS (
+        SELECT
+            model
+            ,trigger_dx
+            ,COUNT(*)                                    AS trigger_volume
+            ,ROUND(AVG(hit_at_5), 4)                     AS hit_at_5
+        FROM all_scores
+        GROUP BY model, trigger_dx
+        HAVING COUNT(*) >= 20
+    ),
+    volume_tiers AS (
         SELECT
             model
             ,trigger_dx
@@ -95,9 +118,7 @@ dx_consistency = client.query(f"""
                 WHEN trigger_volume >= 100  THEN 'Med (100-999)'
                 ELSE 'Low (20-99)'
             END                                          AS volume_tier
-        FROM `{DS}.A870800_gen_rec_analysis_perf_by_diag`
-        WHERE time_bucket = 'T0_30'
-          AND trigger_volume >= 20
+        FROM by_dx
     )
     SELECT
         model
