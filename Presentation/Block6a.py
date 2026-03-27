@@ -123,15 +123,15 @@ level4 = client.query(f"""
 L4_SPEND = f"${float(level4['t180_spend']) / 1e9:.1f}B"
 L4_CLAIMS = f"{float(level4['t180_claims']):,.0f}"
 
-display(Markdown(f"""
-### Dollar Funnel (Corrected, Deduplicated)
-| Level | Description | Spend | Claims |
-|---|---|---|---|
-| 1 | All claims in dataset | {L1_SPEND} | {L1_CLAIMS} |
-| 2 | Trigger-day claims (all dx on trigger date) | {L2_SPEND} | {L2_CLAIMS} |
-| 3 | Trigger dx claims (trigger date + matching dx) | {L2B_SPEND} | {L2B_CLAIMS} |
-| 4 | Immediate next visit (V2) claims | {L3_SPEND} | {L3_CLAIMS} |
-| 5 | All claims within T180 of trigger (approx) | {L4_SPEND} | {L4_CLAIMS} |
-"""))
+import pandas as pd
+
+funnel_df = pd.DataFrame([
+    {"Level": 1, "Description": "All claims in dataset", "Spend": L1_SPEND, "Claims": L1_CLAIMS},
+    {"Level": 2, "Description": "Trigger-day claims (all dx on trigger date)", "Spend": L2_SPEND, "Claims": L2_CLAIMS},
+    {"Level": 3, "Description": "Trigger dx claims (trigger date + matching dx)", "Spend": L2B_SPEND, "Claims": L2B_CLAIMS},
+    {"Level": 4, "Description": "Immediate next visit (V2) claims", "Spend": L3_SPEND, "Claims": L3_CLAIMS},
+    {"Level": 5, "Description": "All claims within T180 of trigger (approx)", "Spend": L4_SPEND, "Claims": L4_CLAIMS},
+])
+display(funnel_df)
 
 print("Block 6a done.")
