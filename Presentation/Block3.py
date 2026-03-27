@@ -9,23 +9,24 @@
 # FACT-22: Hit@5 by member_segment
 # FACT-33: Specialty code → name mapping
 # FACT-38: All models Hit@5 at T30
-# Sources: analysis_perf_overall, analysis_perf_by_ending_specialty,
+# Sources: analysis_perf_full, analysis_perf_by_ending_specialty,
 #          analysis_perf_by_diag, markov_train
 # ============================================================
 from IPython.display import display, Markdown
 
 # ── Query 1: Overall performance — all models, all windows ────
-perf_overall = client.query(f"""
+# Uses analysis_perf_full — only triggers with actual visits in the window
+perf_full = client.query(f"""
     SELECT model, time_bucket, member_segment
-        ,hit_at_5, ndcg_at_5, n_triggers
-    FROM `{DS}.A870800_gen_rec_analysis_perf_overall`
+        ,n_triggers, hit_at_5, ndcg_at_5
+    FROM `{DS}.A870800_gen_rec_analysis_perf_full`
     ORDER BY model, time_bucket, member_segment
 """).to_dataframe()
 
-all_seg = perf_overall[perf_overall["member_segment"] == "ALL"]
+all_seg = perf_full[perf_full["member_segment"] == "ALL"]
 
 # FACT-38: All models at T30
-fact_38 = all_seg[all_seg["time_bucket"] == "T0_30"][["model", "hit_at_5"]].copy()
+fact_38 = all_seg[all_seg["time_bucket"] == "T0_30"][["model", "hit_at_5", "n_triggers"]].copy()
 display(Markdown("### FACT-38: All Models Hit@5 at T30"))
 display(fact_38)
 
@@ -46,10 +47,10 @@ FACT_04_T180 = f"{best.get('T60_180', 0) * 100:.1f}"
 FACT_06 = FACT_04_T30
 
 # FACT-22: Hit@5 by segment at T30 (best model)
-fact_22 = (perf_overall[
-    (perf_overall["model"] == best_model)
-    & (perf_overall["time_bucket"] == "T0_30")
-    & (perf_overall["member_segment"] != "ALL")
+fact_22 = (perf_full[
+    (perf_full["model"] == best_model)
+    & (perf_full["time_bucket"] == "T0_30")
+    & (perf_full["member_segment"] != "ALL")
 ][["member_segment", "hit_at_5", "n_triggers"]]
 .sort_values("hit_at_5", ascending=False)
 .copy())
