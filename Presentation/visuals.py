@@ -554,18 +554,30 @@ display(Markdown("""
 
 # ══════════════════════════════════════════════════════════════
 # VIS-11: COST vs ACCURACY QUADRANT — INBOUND (A7)
-# No quadrant labels. X-cap at max+5B. Top N labels only.
+# Uses NEXT VISIT (V2) spend only — not downstream T180
+# Log scale x-axis to handle outliers
+# Top N labels only to avoid clutter
 # ══════════════════════════════════════════════════════════════
 display(Markdown("---\n## VIS-11: Cost vs Accuracy Quadrant (Inbound)"))
 
-quad = spend_spec.merge(
+# V2 spend only — explicit filter
+spend_v2 = client.query(f"""
+    SELECT grouping_code AS code, grouping_desc AS name
+        ,SUM(total_allowed_amt) AS v2_spend
+        ,SUM(visit_count) AS v2_visits
+    FROM `{DS}.A870800_gen_rec_f_spend_summary`
+    WHERE summary_type = 'specialty'
+      AND visit_type = 'v2'
+      AND grouping_code IS NOT NULL AND grouping_code != ''
+    GROUP BY 1, 2 ORDER BY 3 DESC
+""").to_dataframe()
+
+quad = spend_v2.merge(
     perf_spec[["ending_specialty", "hit_rate_at_5", "total_appearances", "display"]],
     left_on="code", right_on="ending_specialty", how="inner"
 )
-quad["spend_b"] = quad["total_spend"].astype(float) / 1e9
+quad["spend_b"] = quad["v2_spend"].astype(float) / 1e9
 
-max_spend = quad["spend_b"].max()
-x_cap = max_spend + 5
 avg_hit = quad["hit_rate_at_5"].mean()
 med_spend = quad["spend_b"].median()
 
@@ -578,7 +590,7 @@ for idx, row in quad.iterrows():
                s=sizes_q.loc[idx] if idx in sizes_q.index else 60,
                c=clr, alpha=0.7, edgecolors="white", linewidth=0.5)
 
-# Top 10 by spend only — avoids label clutter
+# Top 10 by spend — avoids clutter
 top_n_labels = quad.nlargest(10, "spend_b")
 for _, row in top_n_labels.iterrows():
     ax.annotate(row["display"][:25],
@@ -588,14 +600,14 @@ for _, row in top_n_labels.iterrows():
 ax.axvline(med_spend, color=GRID_CLR, linestyle="--", linewidth=1)
 ax.axhline(avg_hit * 100, color=GRID_CLR, linestyle="--", linewidth=1)
 
-ax.set_xlabel("Total Downstream Spend ($B)")
+ax.set_xscale("log")
+ax.set_xlabel("Next Visit (V2) Allowed Amount ($B, log scale)")
 ax.set_ylabel("Inbound Hit@5 at T30 (%)")
 ax.yaxis.set_major_formatter(mticker.PercentFormatter())
-ax.set_xlim(0, x_cap)
 ax.set_ylim(0, 100)
 ax.grid(color=GRID_CLR, linewidth=0.5, alpha=0.5)
-ax.set_title("Inbound: Downstream Spend vs Prediction Accuracy by Specialty\n"
-             "Point size = trigger volume. Dashed lines = median spend / average accuracy.")
+ax.set_title("Inbound: Next Visit Spend vs Prediction Accuracy by Specialty\n"
+             "V2 allowed amount only (no downstream). Point size = trigger volume.")
 plt.tight_layout()
 plt.savefig(f"{OUT}vis_11_quadrant.png")
 plt.show()
