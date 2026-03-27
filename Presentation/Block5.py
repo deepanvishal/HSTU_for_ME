@@ -110,8 +110,12 @@ try:
 - {FACT_27} conditions above threshold
 - {FACT_28} triggers covered
 """))
+except NameError:
+    print("WARNING: fact_19_raw not found — run Block 3 first")
+    FACT_27 = "TBD"
+    FACT_28 = "TBD"
 
-
+print("Block 5 done.")
 
 
 client.query(f"""
@@ -127,9 +131,3 @@ client.query(f"""
         ,COUNT(DISTINCT CONCAT(member_id, '|', CAST(trigger_date AS STRING), '|', trigger_dx))
     FROM `{DS}.A870800_gen_rec_model_test`
 """).to_dataframe()
-except NameError:
-    print("WARNING: fact_19_raw not found — run Block 3 first")
-    FACT_27 = "TBD"
-    FACT_28 = "TBD"
-
-print("Block 5 done.")
