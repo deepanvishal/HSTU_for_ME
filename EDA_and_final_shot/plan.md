@@ -1,5 +1,5 @@
 ## Plan
-1. # of claims 
+1. number of claims 
 2. Claims distro over the years
 3. Members totally in three years and over year.
 4. distro of members
