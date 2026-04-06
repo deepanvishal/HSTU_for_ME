@@ -35,29 +35,36 @@ ORDER BY members DESC
 ;
 
 -- ------------------------------------------------------------
--- Q4. Age distribution
+-- Q4. Age group distribution (0-18, 18-65, 65+)
 -- ------------------------------------------------------------
 SELECT
-    MIN(age_nbr)                                           AS age_min
-    ,MAX(age_nbr)                                          AS age_max
-    ,ROUND(AVG(age_nbr), 1)                                AS age_mean
-    ,APPROX_QUANTILES(age_nbr, 100)[OFFSET(10)]            AS age_p10
-    ,APPROX_QUANTILES(age_nbr, 100)[OFFSET(25)]            AS age_p25
-    ,APPROX_QUANTILES(age_nbr, 100)[OFFSET(50)]            AS age_median
-    ,APPROX_QUANTILES(age_nbr, 100)[OFFSET(75)]            AS age_p75
-    ,APPROX_QUANTILES(age_nbr, 100)[OFFSET(90)]            AS age_p90
+    CASE
+        WHEN age_nbr < 18               THEN '1_0_to_18'
+        WHEN age_nbr BETWEEN 18 AND 65  THEN '2_18_to_65'
+        WHEN age_nbr > 65               THEN '3_65_plus'
+        ELSE                                 'Unknown'
+    END                                                    AS age_group
+    ,COUNT(DISTINCT member_id)                             AS members
+    ,ROUND(100.0 * COUNT(DISTINCT member_id) /
+        SUM(COUNT(DISTINCT member_id)) OVER (), 2)         AS pct
 FROM (
     SELECT member_id, MAX(age_nbr) AS age_nbr
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_member_demographics`
     GROUP BY member_id
 )
+GROUP BY age_group
+ORDER BY age_group
 ;
 
 -- ------------------------------------------------------------
--- Q5. Gender split
+-- Q5. Gender split (Male / Female)
 -- ------------------------------------------------------------
 SELECT
-    gender_cd
+    CASE
+        WHEN gender_cd = 'M' THEN 'Male'
+        WHEN gender_cd = 'F' THEN 'Female'
+        ELSE                      'Unknown'
+    END                                                    AS gender
     ,COUNT(DISTINCT member_id)                             AS members
     ,ROUND(100.0 * COUNT(DISTINCT member_id) /
         SUM(COUNT(DISTINCT member_id)) OVER (), 2)         AS pct
@@ -66,7 +73,32 @@ FROM (
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_member_demographics`
     GROUP BY member_id
 )
-GROUP BY gender_cd
+GROUP BY gender
+ORDER BY members DESC
+;
+
+-- ------------------------------------------------------------
+-- Q5b. Member segment distribution
+-- Segments: Children, Adult_Male, Adult_Female, Senior
+-- (exact values from _02_data_setup_visits.sql)
+-- ------------------------------------------------------------
+SELECT
+    CASE
+        WHEN age_nbr < 18                               THEN 'Children'
+        WHEN age_nbr BETWEEN 18 AND 65 AND gender_cd = 'M' THEN 'Adult_Male'
+        WHEN age_nbr BETWEEN 18 AND 65 AND gender_cd = 'F' THEN 'Adult_Female'
+        WHEN age_nbr > 65                               THEN 'Senior'
+        ELSE                                                 'Unknown'
+    END                                                    AS member_segment
+    ,COUNT(DISTINCT member_id)                             AS members
+    ,ROUND(100.0 * COUNT(DISTINCT member_id) /
+        SUM(COUNT(DISTINCT member_id)) OVER (), 2)         AS pct
+FROM (
+    SELECT member_id, MAX(age_nbr) AS age_nbr, MAX(gender_cd) AS gender_cd
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_member_demographics`
+    GROUP BY member_id
+)
+GROUP BY member_segment
 ORDER BY members DESC
 ;
 
