@@ -79,35 +79,48 @@ LIMIT 10
 --     Assign Low / Medium / High based on trigger_volume
 --     Show avg Hit@5 per tier
 -- ============================================================
-WITH volume_tiers AS (
+WITH base AS (
     SELECT
         trigger_dx
         ,trigger_volume
         ,hit_at_5
         ,ndcg_at_5
-        ,CASE
-            WHEN trigger_volume <= APPROX_QUANTILES(trigger_volume, 100)
-                    OVER ()[OFFSET(33)]   THEN '1_Low'
-            WHEN trigger_volume <= APPROX_QUANTILES(trigger_volume, 100)
-                    OVER ()[OFFSET(66)]   THEN '2_Medium'
-            ELSE                              '3_High'
-        END                                                AS volume_tier
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_diag`
     WHERE model        = 'BERT4Rec'
       AND time_bucket  = 'T0_30'
       AND trigger_volume >= 20
+),
+percentiles AS (
+    SELECT
+        APPROX_QUANTILES(trigger_volume, 100)[OFFSET(33)]  AS p33
+        ,APPROX_QUANTILES(trigger_volume, 100)[OFFSET(66)] AS p66
+    FROM base
+),
+tiered AS (
+    SELECT
+        b.trigger_dx
+        ,b.trigger_volume
+        ,b.hit_at_5
+        ,b.ndcg_at_5
+        ,CASE
+            WHEN b.trigger_volume <= p.p33 THEN '1_Low'
+            WHEN b.trigger_volume <= p.p66 THEN '2_Medium'
+            ELSE                               '3_High'
+        END                                                AS volume_tier
+    FROM base b
+    CROSS JOIN percentiles p
 )
 SELECT
     volume_tier
     ,COUNT(DISTINCT trigger_dx)                            AS dx_count
     ,SUM(trigger_volume)                                   AS total_volume
-    ,ROUND(MIN(trigger_volume), 0)                         AS min_volume
-    ,ROUND(MAX(trigger_volume), 0)                         AS max_volume
+    ,MIN(trigger_volume)                                   AS min_volume
+    ,MAX(trigger_volume)                                   AS max_volume
     ,ROUND(AVG(hit_at_5), 4)                               AS avg_hit_at_5
     ,ROUND(MIN(hit_at_5), 4)                               AS min_hit_at_5
     ,ROUND(MAX(hit_at_5), 4)                               AS max_hit_at_5
     ,ROUND(AVG(ndcg_at_5), 4)                              AS avg_ndcg_at_5
-FROM volume_tiers
+FROM tiered
 GROUP BY volume_tier
 ORDER BY volume_tier
 ;
