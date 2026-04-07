@@ -1,0 +1,9 @@
+torch>=2.0
+numpy
+pandas
+google-cloud-bigquery
+google-cloud-bigquery-storage
+pyarrow
+matplotlib
+seaborn
+scikit-learn
