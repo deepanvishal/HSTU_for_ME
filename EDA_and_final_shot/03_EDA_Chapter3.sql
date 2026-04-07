@@ -169,19 +169,19 @@ ORDER BY gap_bucket
 
 -- ------------------------------------------------------------
 -- Q7. % of visit pairs with 1-day gap
--- And among those — what % involve inpatient (W%) specialty
+-- And among those — what % involve inpatient (plc_srv_ctg_cd = 'I')
 -- ------------------------------------------------------------
 WITH visit_pairs AS (
     SELECT
         v.member_id
         ,v.visit_date                                      AS current_visit
-        ,v.specialty_ctg_cd                                AS current_specialty
+        ,v.plc_srv_cd                                      AS current_plc_srv_cd
         ,LAG(v.visit_date) OVER (
             PARTITION BY v.member_id ORDER BY v.visit_date
         )                                                  AS prev_visit
-        ,LAG(v.specialty_ctg_cd) OVER (
+        ,LAG(v.plc_srv_cd) OVER (
             PARTITION BY v.member_id ORDER BY v.visit_date
-        )                                                  AS prev_specialty
+        )                                                  AS prev_plc_srv_cd
         ,DATE_DIFF(
             v.visit_date,
             LAG(v.visit_date) OVER (
@@ -197,11 +197,11 @@ SELECT
     ,ROUND(100.0 * COUNTIF(days_gap = 1)
         / COUNT(*), 2)                                     AS pct_1day_gap
     ,COUNTIF(days_gap = 1
-        AND (current_specialty LIKE 'W%'
-             OR prev_specialty LIKE 'W%'))                 AS pairs_1day_inpatient
+        AND (current_plc_srv_cd = 'I'
+             OR prev_plc_srv_cd = 'I'))                    AS pairs_1day_inpatient
     ,ROUND(100.0 * COUNTIF(days_gap = 1
-        AND (current_specialty LIKE 'W%'
-             OR prev_specialty LIKE 'W%'))
+        AND (current_plc_srv_cd = 'I'
+             OR prev_plc_srv_cd = 'I'))
         / NULLIF(COUNTIF(days_gap = 1), 0), 2)            AS pct_1day_gap_inpatient
 FROM visit_pairs
 WHERE days_gap IS NOT NULL
@@ -211,9 +211,9 @@ WHERE days_gap IS NOT NULL
 -- Q8. Overall % of visit rows that are inpatient
 -- ------------------------------------------------------------
 SELECT
-    COUNTIF(specialty_ctg_cd LIKE 'W%')                    AS inpatient_visit_rows
+    COUNTIF(plc_srv_ctg_cd = 'I')                    AS inpatient_visit_rows
     ,COUNT(*)                                              AS total_visit_rows
-    ,ROUND(100.0 * COUNTIF(specialty_ctg_cd LIKE 'W%')
+    ,ROUND(100.0 * COUNTIF(plc_srv_ctg_cd = 'I')
         / COUNT(*), 2)                                     AS pct_inpatient
 FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits`
 ;
@@ -231,7 +231,7 @@ WITH inpatient_visits AS (
         member_id
         ,visit_date
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits`
-    WHERE specialty_ctg_cd LIKE 'W%'
+    WHERE plc_srv_ctg_cd = 'I'
 ),
 with_gap AS (
     SELECT
@@ -286,7 +286,7 @@ WITH inpatient_collapsed AS (
     WITH inpatient_visits AS (
         SELECT DISTINCT member_id, visit_date
         FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits`
-        WHERE specialty_ctg_cd LIKE 'W%'
+        WHERE plc_srv_ctg_cd = 'I'
     ),
     with_gap AS (
         SELECT
@@ -315,7 +315,7 @@ WITH inpatient_collapsed AS (
 non_inpatient AS (
     SELECT DISTINCT member_id, visit_date
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits`
-    WHERE specialty_ctg_cd NOT LIKE 'W%'
+    WHERE plc_srv_ctg_cd != 'I'
 ),
 combined AS (
     SELECT member_id, visit_date FROM inpatient_collapsed
