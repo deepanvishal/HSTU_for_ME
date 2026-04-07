@@ -32,7 +32,7 @@ UNION ALL
 SELECT
     'L2_Claimants'                                         AS population
     ,COUNT(DISTINCT c.member_id)                           AS members
-    ,ROUND(100.0 * COUNT(DISTINCT c.member_id) / e.total_enrolled, 2) AS pct_of_enrolled
+    ,ROUND(100.0 * COUNT(DISTINCT c.member_id) / ANY_VALUE(e.total_enrolled), 2) AS pct_of_enrolled
 FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_2022_2025_sfl` c
 CROSS JOIN enrolled e
 
@@ -41,7 +41,7 @@ UNION ALL
 SELECT
     'L3_Members with Triggers'                             AS population
     ,COUNT(DISTINCT t.member_id)                           AS members
-    ,ROUND(100.0 * COUNT(DISTINCT t.member_id) / e.total_enrolled, 2) AS pct_of_enrolled
+    ,ROUND(100.0 * COUNT(DISTINCT t.member_id) / ANY_VALUE(e.total_enrolled), 2) AS pct_of_enrolled
 FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers_qualified` t
 CROSS JOIN enrolled e
 
@@ -50,7 +50,7 @@ UNION ALL
 SELECT
     'L4_Left Qualified Members'                            AS population
     ,COUNT(DISTINCT t.member_id)                           AS members
-    ,ROUND(100.0 * COUNT(DISTINCT t.member_id) / e.total_enrolled, 2) AS pct_of_enrolled
+    ,ROUND(100.0 * COUNT(DISTINCT t.member_id) / ANY_VALUE(e.total_enrolled), 2) AS pct_of_enrolled
 FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers_qualified` t
 CROSS JOIN enrolled e
 WHERE t.is_left_qualified = TRUE
@@ -60,7 +60,7 @@ UNION ALL
 SELECT
     'L5_T30 Qualified Members'                             AS population
     ,COUNT(DISTINCT t.member_id)                           AS members
-    ,ROUND(100.0 * COUNT(DISTINCT t.member_id) / e.total_enrolled, 2) AS pct_of_enrolled
+    ,ROUND(100.0 * COUNT(DISTINCT t.member_id) / ANY_VALUE(e.total_enrolled), 2) AS pct_of_enrolled
 FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers_qualified` t
 CROSS JOIN enrolled e
 WHERE t.is_t30_qualified = TRUE
@@ -70,7 +70,7 @@ UNION ALL
 SELECT
     'L6_T60 Qualified Members'                             AS population
     ,COUNT(DISTINCT t.member_id)                           AS members
-    ,ROUND(100.0 * COUNT(DISTINCT t.member_id) / e.total_enrolled, 2) AS pct_of_enrolled
+    ,ROUND(100.0 * COUNT(DISTINCT t.member_id) / ANY_VALUE(e.total_enrolled), 2) AS pct_of_enrolled
 FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers_qualified` t
 CROSS JOIN enrolled e
 WHERE t.is_t60_qualified = TRUE
@@ -80,7 +80,7 @@ UNION ALL
 SELECT
     'L7_T180 Qualified Members'                            AS population
     ,COUNT(DISTINCT t.member_id)                           AS members
-    ,ROUND(100.0 * COUNT(DISTINCT t.member_id) / e.total_enrolled, 2) AS pct_of_enrolled
+    ,ROUND(100.0 * COUNT(DISTINCT t.member_id) / ANY_VALUE(e.total_enrolled), 2) AS pct_of_enrolled
 FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers_qualified` t
 CROSS JOIN enrolled e
 WHERE t.is_t180_qualified = TRUE
