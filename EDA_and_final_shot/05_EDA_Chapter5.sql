@@ -161,6 +161,7 @@ ORDER BY dataset
 
 -- ------------------------------------------------------------
 -- Q4. Median days between visits — Raw vs T180 Qualified
+-- Fix: GROUP BY member_id, date to deduplicate same-day rows before LAG
 -- ------------------------------------------------------------
 SELECT
     'Raw'                                                  AS dataset
@@ -173,8 +174,9 @@ FROM (
                 PARTITION BY member_id ORDER BY srv_start_dt
             ), DAY)                                        AS days_gap
     FROM (
-        SELECT DISTINCT member_id, srv_start_dt
+        SELECT member_id, srv_start_dt
         FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_claims_gen_rec_2022_2025_sfl`
+        GROUP BY member_id, srv_start_dt
     )
 )
 WHERE days_gap IS NOT NULL
@@ -192,9 +194,10 @@ FROM (
                 PARTITION BY member_id ORDER BY visit_date
             ), DAY)                                        AS days_gap
     FROM (
-        SELECT DISTINCT member_id, visit_date
+        SELECT member_id, visit_date
         FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits_qualified`
         WHERE is_t180_qualified = TRUE
+        GROUP BY member_id, visit_date
     )
 )
 WHERE days_gap IS NOT NULL
