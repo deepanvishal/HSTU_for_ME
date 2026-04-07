@@ -1,50 +1,60 @@
 -- ============================================================
 -- NB_PMA_01_specialty.sql
 -- Purpose : Post-model analysis at TARGET SPECIALTY level
--- Primary metric : Hit@5, T0_30, SASRec
--- Questions:
---   Q1. Top 10 most predictable target specialties
---   Q2. POS distribution for each specialty (inpatient %)
---   Q3. Performance across T30 / T60 / T180 for top 10
---   Q4. Volume tiers (Low/Med/High at 33/66 pct) x Hit@5
---   Q5. Member segment performance for top 10 specialties
--- Sources:
---   A870800_gen_rec_analysis_perf_by_ending_specialty
---   A870800_gen_rec_visits_qualified
---   A870800_gen_rec_markov_train
---   A870800_gen_rec_analysis_perf_overall
+-- Primary metric : Hit@5, T0_30, BERT4Rec
+-- All specialty codes shown with descriptions
 -- ============================================================
 
 -- ============================================================
 -- Q1. Top 10 most predictable target specialties
---     Primary metric: Hit@5, T0_30, SASRec descending
+--     BERT4Rec, T0_30, Hit@5 descending
+--     Description from markov_train next_specialty_desc
 -- ============================================================
+WITH specialty_desc AS (
+    SELECT DISTINCT
+        next_specialty
+        ,next_specialty_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_markov_train`
+    WHERE next_specialty IS NOT NULL
+)
 SELECT
-    ending_specialty
-    ,total_appearances
-    ,predicted_at_1
-    ,predicted_at_3
-    ,predicted_at_5
-    ,ROUND(hit_rate_at_5, 4)                               AS hit_rate_at_5
-    ,ROUND(avg_ndcg_at_3, 4)                               AS avg_ndcg_at_3
-    ,ROUND(100.0 * predicted_at_5 / total_appearances, 2)  AS hit_pct_at_5
-FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty`
-WHERE model        = 'SASRec'
-  AND time_bucket  = 'T0_30'
-  AND total_appearances >= 20
-ORDER BY hit_rate_at_5 DESC
+    p.ending_specialty
+    ,d.next_specialty_desc                                 AS specialty_desc
+    ,p.total_appearances
+    ,p.predicted_at_1
+    ,p.predicted_at_3
+    ,p.predicted_at_5
+    ,ROUND(p.hit_rate_at_5, 4)                             AS hit_rate_at_5
+    ,ROUND(p.avg_ndcg_at_3, 4)                             AS avg_ndcg_at_3
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty` p
+LEFT JOIN specialty_desc d ON p.ending_specialty = d.next_specialty
+WHERE p.model       = 'BERT4Rec'
+  AND p.time_bucket = 'T0_30'
+  AND p.total_appearances >= 20
+ORDER BY p.hit_rate_at_5 DESC
 LIMIT 10
 ;
 
 -- ============================================================
--- Q2. Place of service distribution per ending specialty
---     Join perf_by_ending_specialty → visits_qualified
---     Dedupe: one record per member + visit_date + specialty
---     Shows % inpatient among downstream visits per specialty
+-- Q2. Place of service distribution for top 10 specialties
+--     Deduped: one record per member + visit_date + specialty
+--     Shows % inpatient alongside Hit@5
 -- ============================================================
-WITH deduped_visits AS (
-    -- One row per member + visit_date + specialty
-    -- Collapse multiple claim lines on same day to single visit
+WITH specialty_desc AS (
+    SELECT DISTINCT next_specialty, next_specialty_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_markov_train`
+    WHERE next_specialty IS NOT NULL
+),
+top10 AS (
+    SELECT ending_specialty
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty`
+    WHERE model        = 'BERT4Rec'
+      AND time_bucket  = 'T0_30'
+      AND total_appearances >= 20
+    ORDER BY hit_rate_at_5 DESC
+    LIMIT 10
+),
+deduped_visits AS (
     SELECT
         member_id
         ,visit_date
@@ -52,11 +62,7 @@ WITH deduped_visits AS (
         ,MAX(plc_srv_cd)                                   AS plc_srv_cd
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits_qualified`
     WHERE is_left_qualified = TRUE
-      AND (
-          is_t30_qualified  = TRUE
-       OR is_t60_qualified  = TRUE
-       OR is_t180_qualified = TRUE
-      )
+      AND (is_t30_qualified = TRUE OR is_t60_qualified = TRUE OR is_t180_qualified = TRUE)
       AND specialty_ctg_cd IS NOT NULL
     GROUP BY member_id, visit_date, specialty_ctg_cd
 ),
@@ -65,132 +71,72 @@ pos_by_specialty AS (
         specialty_ctg_cd                                   AS ending_specialty
         ,COUNT(*)                                          AS total_visits
         ,COUNTIF(plc_srv_cd = 'I')                         AS inpatient_visits
-        ,COUNTIF(plc_srv_cd != 'I')                        AS outpatient_visits
-        ,ROUND(100.0 * COUNTIF(plc_srv_cd = 'I')
-            / COUNT(*), 2)                                 AS pct_inpatient
-        ,ROUND(100.0 * COUNTIF(plc_srv_cd != 'I')
-            / COUNT(*), 2)                                 AS pct_outpatient
+        ,ROUND(100.0 * COUNTIF(plc_srv_cd = 'I') / COUNT(*), 2) AS pct_inpatient
+        ,ROUND(100.0 * COUNTIF(plc_srv_cd != 'I') / COUNT(*), 2) AS pct_outpatient
     FROM deduped_visits
     GROUP BY specialty_ctg_cd
-),
-top10 AS (
-    SELECT ending_specialty
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty`
-    WHERE model        = 'SASRec'
-      AND time_bucket  = 'T0_30'
-      AND total_appearances >= 20
-    ORDER BY hit_rate_at_5 DESC
-    LIMIT 10
 )
 SELECT
     p.ending_specialty
-    ,p.total_visits
-    ,p.inpatient_visits
-    ,p.outpatient_visits
-    ,p.pct_inpatient
-    ,p.pct_outpatient
-    ,perf.hit_rate_at_5
-    ,perf.total_appearances
-FROM pos_by_specialty p
-JOIN top10 t ON p.ending_specialty = t.ending_specialty
-JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty` perf
-    ON p.ending_specialty = perf.ending_specialty
-    AND perf.model       = 'SASRec'
-    AND perf.time_bucket = 'T0_30'
-ORDER BY perf.hit_rate_at_5 DESC
+    ,d.next_specialty_desc                                 AS specialty_desc
+    ,pos.total_visits
+    ,pos.inpatient_visits
+    ,pos.pct_inpatient
+    ,pos.pct_outpatient
+    ,ROUND(p.hit_rate_at_5, 4)                             AS hit_rate_at_5
+    ,p.total_appearances
+FROM top10 t
+JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty` p
+    ON t.ending_specialty = p.ending_specialty
+    AND p.model       = 'BERT4Rec'
+    AND p.time_bucket = 'T0_30'
+LEFT JOIN pos_by_specialty pos ON t.ending_specialty = pos.ending_specialty
+LEFT JOIN specialty_desc d ON t.ending_specialty = d.next_specialty
+ORDER BY p.hit_rate_at_5 DESC
 ;
 
 -- ============================================================
 -- Q3. Performance across T0_30 / T30_60 / T60_180
---     For the top 10 specialties by T0_30 Hit@5
---     All 3 models shown side by side
+--     Top 10 specialties — BERT4Rec only — with descriptions
 -- ============================================================
-WITH top10 AS (
+WITH specialty_desc AS (
+    SELECT DISTINCT next_specialty, next_specialty_desc
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_markov_train`
+    WHERE next_specialty IS NOT NULL
+),
+top10 AS (
     SELECT ending_specialty
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty`
-    WHERE model        = 'SASRec'
-      AND time_bucket  = 'T0_30'
-      AND total_appearances >= 20
+    WHERE model = 'BERT4Rec' AND time_bucket = 'T0_30' AND total_appearances >= 20
     ORDER BY hit_rate_at_5 DESC
     LIMIT 10
 )
 SELECT
     p.ending_specialty
-    ,p.model
+    ,d.next_specialty_desc                                 AS specialty_desc
     ,p.time_bucket
     ,p.total_appearances
     ,ROUND(p.hit_rate_at_5, 4)                             AS hit_rate_at_5
     ,ROUND(p.avg_ndcg_at_3, 4)                             AS avg_ndcg_at_3
 FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty` p
-JOIN top10 t ON p.ending_specialty = t.ending_specialty
-WHERE p.total_appearances >= 20
-ORDER BY
-    p.ending_specialty
-    ,p.model
-    ,p.time_bucket
+JOIN top10 t     ON p.ending_specialty = t.ending_specialty
+LEFT JOIN specialty_desc d ON p.ending_specialty = d.next_specialty
+WHERE p.model = 'BERT4Rec'
+  AND p.total_appearances >= 20
+ORDER BY p.ending_specialty, p.time_bucket
 ;
 
 -- ============================================================
 -- Q4. Volume tiers × Hit@5
---     Use markov_train transition_count per next_specialty
---     to define Low / Medium / High volume tiers at 33/66 pct
---     Then show Hit@5 (T0_30, SASRec) per tier
+--     markov_train transition_count per next_specialty
+--     33 / 66 pct → Low / Medium / High
 -- ============================================================
-WITH specialty_volume AS (
-    -- Total transition volume per target specialty from markov train
-    SELECT
-        next_specialty                                     AS ending_specialty
-        ,next_specialty_desc                               AS ending_specialty_desc
-        ,SUM(transition_count)                             AS total_transitions
-        ,SUM(unique_members)                               AS total_members
+WITH specialty_desc AS (
+    SELECT DISTINCT next_specialty, next_specialty_desc
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_markov_train`
     WHERE next_specialty IS NOT NULL
-    GROUP BY next_specialty, next_specialty_desc
 ),
-percentiles AS (
-    -- Compute 33rd and 66th percentile thresholds
-    SELECT
-        APPROX_QUANTILES(total_transitions, 100)[OFFSET(33)] AS p33
-        ,APPROX_QUANTILES(total_transitions, 100)[OFFSET(66)] AS p66
-    FROM specialty_volume
-),
-tiered AS (
-    SELECT
-        v.ending_specialty
-        ,v.ending_specialty_desc
-        ,v.total_transitions
-        ,v.total_members
-        ,CASE
-            WHEN v.total_transitions <= p.p33 THEN '1_Low'
-            WHEN v.total_transitions <= p.p66 THEN '2_Medium'
-            ELSE                                   '3_High'
-        END                                                AS volume_tier
-    FROM specialty_volume v
-    CROSS JOIN percentiles p
-)
-SELECT
-    ti.volume_tier
-    ,ti.ending_specialty
-    ,ti.ending_specialty_desc
-    ,ti.total_transitions
-    ,ti.total_members
-    ,ROUND(p.hit_rate_at_5, 4)                             AS hit_rate_at_5
-    ,ROUND(p.avg_ndcg_at_3, 4)                             AS avg_ndcg_at_3
-    ,p.total_appearances
-FROM tiered ti
-JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty` p
-    ON ti.ending_specialty = p.ending_specialty
-    AND p.model       = 'SASRec'
-    AND p.time_bucket = 'T0_30'
-    AND p.total_appearances >= 20
-ORDER BY ti.volume_tier, p.hit_rate_at_5 DESC
-;
-
--- ============================================================
--- Q4b. Summary — avg Hit@5 per volume tier
---      High-level view: does higher volume = better prediction?
--- ============================================================
-WITH specialty_volume AS (
+specialty_volume AS (
     SELECT
         next_specialty                                     AS ending_specialty
         ,SUM(transition_count)                             AS total_transitions
@@ -207,19 +153,65 @@ percentiles AS (
 tiered AS (
     SELECT
         v.ending_specialty
+        ,v.total_transitions
         ,CASE
             WHEN v.total_transitions <= p.p33 THEN '1_Low'
             WHEN v.total_transitions <= p.p66 THEN '2_Medium'
             ELSE                                   '3_High'
         END                                                AS volume_tier
-        ,v.total_transitions
     FROM specialty_volume v
     CROSS JOIN percentiles p
 )
 SELECT
     ti.volume_tier
+    ,ti.ending_specialty
+    ,d.next_specialty_desc                                 AS specialty_desc
+    ,ti.total_transitions
+    ,p.total_appearances
+    ,ROUND(p.hit_rate_at_5, 4)                             AS hit_rate_at_5
+    ,ROUND(p.avg_ndcg_at_3, 4)                             AS avg_ndcg_at_3
+FROM tiered ti
+JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty` p
+    ON ti.ending_specialty = p.ending_specialty
+    AND p.model       = 'BERT4Rec'
+    AND p.time_bucket = 'T0_30'
+    AND p.total_appearances >= 20
+LEFT JOIN specialty_desc d ON ti.ending_specialty = d.next_specialty
+ORDER BY ti.volume_tier, p.hit_rate_at_5 DESC
+;
+
+-- ============================================================
+-- Q4b. Volume tier summary — avg Hit@5 per tier
+-- ============================================================
+WITH specialty_volume AS (
+    SELECT
+        next_specialty AS ending_specialty
+        ,SUM(transition_count) AS total_transitions
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_markov_train`
+    WHERE next_specialty IS NOT NULL
+    GROUP BY next_specialty
+),
+percentiles AS (
+    SELECT
+        APPROX_QUANTILES(total_transitions, 100)[OFFSET(33)] AS p33
+        ,APPROX_QUANTILES(total_transitions, 100)[OFFSET(66)] AS p66
+    FROM specialty_volume
+),
+tiered AS (
+    SELECT
+        v.ending_specialty
+        ,v.total_transitions
+        ,CASE
+            WHEN v.total_transitions <= p.p33 THEN '1_Low'
+            WHEN v.total_transitions <= p.p66 THEN '2_Medium'
+            ELSE                                   '3_High'
+        END AS volume_tier
+    FROM specialty_volume v CROSS JOIN percentiles p
+)
+SELECT
+    ti.volume_tier
     ,COUNT(DISTINCT ti.ending_specialty)                   AS specialty_count
-    ,SUM(ti.total_transitions)                             AS total_transitions_in_tier
+    ,SUM(ti.total_transitions)                             AS total_transitions
     ,ROUND(AVG(p.hit_rate_at_5), 4)                        AS avg_hit_rate_at_5
     ,ROUND(MIN(p.hit_rate_at_5), 4)                        AS min_hit_rate_at_5
     ,ROUND(MAX(p.hit_rate_at_5), 4)                        AS max_hit_rate_at_5
@@ -227,7 +219,7 @@ SELECT
 FROM tiered ti
 JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty` p
     ON ti.ending_specialty = p.ending_specialty
-    AND p.model       = 'SASRec'
+    AND p.model       = 'BERT4Rec'
     AND p.time_bucket = 'T0_30'
     AND p.total_appearances >= 20
 GROUP BY ti.volume_tier
@@ -235,44 +227,71 @@ ORDER BY ti.volume_tier
 ;
 
 -- ============================================================
--- Q5. Member segment performance for top 10 specialties
---     Cross perf_overall (segment level) with top 10 list
---     SASRec T0_30 Hit@5 by segment
+-- Q5. Member segment performance — BERT4Rec T0_30
 -- ============================================================
-WITH top10 AS (
-    SELECT ending_specialty
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_by_ending_specialty`
-    WHERE model        = 'SASRec'
-      AND time_bucket  = 'T0_30'
-      AND total_appearances >= 20
-    ORDER BY hit_rate_at_5 DESC
-    LIMIT 10
-),
-segment_perf AS (
-    SELECT
-        model
-        ,time_bucket
-        ,member_segment
-        ,ROUND(hit_at_5, 4)                                AS hit_at_5
-        ,ROUND(ndcg_at_5, 4)                               AS ndcg_at_5
-        ,n_triggers
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_overall`
-    WHERE model       = 'SASRec'
-      AND time_bucket = 'T0_30'
-      AND member_segment != 'ALL'
-)
 SELECT
-    s.member_segment
-    ,s.hit_at_5
-    ,s.ndcg_at_5
-    ,s.n_triggers
-    -- Overall Hit@5 for reference
-    ,overall.hit_at_5                                      AS overall_hit_at_5
-FROM segment_perf s
+    o.member_segment
+    ,o.n_triggers
+    ,ROUND(o.hit_at_5, 4)                                  AS hit_at_5
+    ,ROUND(o.ndcg_at_5, 4)                                 AS ndcg_at_5
+    ,ROUND(overall.hit_at_5, 4)                            AS overall_hit_at_5
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_overall` o
 CROSS JOIN (
     SELECT ROUND(hit_at_5, 4) AS hit_at_5
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_analysis_perf_overall`
-    WHERE model = 'SASRec' AND time_bucket = 'T0_30' AND member_segment = 'ALL'
+    WHERE model = 'BERT4Rec' AND time_bucket = 'T0_30' AND member_segment = 'ALL'
 ) overall
-ORDER BY s.hit_at_5 DESC
+WHERE o.model        = 'BERT4Rec'
+  AND o.time_bucket  = 'T0_30'
+  AND o.member_segment != 'ALL'
+ORDER BY o.hit_at_5 DESC
+;
+
+-- ============================================================
+-- Q6. Hit@5 by pre-trigger visit history bucket
+--     How does having more visit history before trigger
+--     affect model predictive performance?
+--     Buckets: 1, 2, 3-5, 6-10, 11-20, 20+
+--     Source: raw trigger scores joined to visits
+-- ============================================================
+WITH pre_trigger_counts AS (
+    -- Count distinct visit dates BEFORE each trigger
+    -- Join on member_id + trigger_date (scoped per trigger)
+    SELECT
+        s.member_id
+        ,CAST(s.trigger_date AS DATE)                      AS trigger_date
+        ,s.trigger_dx
+        ,s.time_bucket
+        ,s.hit_at_5
+        ,s.ndcg_at_5
+        ,COUNT(DISTINCT v.visit_date)                      AS visits_before_trigger
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_trigger_scores` s
+    LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits` v
+        ON s.member_id = v.member_id
+        AND v.visit_date < CAST(s.trigger_date AS DATE)
+    WHERE s.model      = 'BERT4Rec'
+      AND s.time_bucket = 'T0_30'
+    GROUP BY
+        s.member_id, s.trigger_date, s.trigger_dx
+        ,s.time_bucket, s.hit_at_5, s.ndcg_at_5
+)
+SELECT
+    CASE
+        WHEN visits_before_trigger = 1          THEN '01_exactly_1'
+        WHEN visits_before_trigger = 2          THEN '02_exactly_2'
+        WHEN visits_before_trigger BETWEEN 3 AND 5   THEN '03_3_to_5'
+        WHEN visits_before_trigger BETWEEN 6 AND 10  THEN '04_6_to_10'
+        WHEN visits_before_trigger BETWEEN 11 AND 20 THEN '05_11_to_20'
+        WHEN visits_before_trigger > 20         THEN '06_20_plus'
+        ELSE                                         '00_no_history'
+    END                                                    AS visit_history_bucket
+    ,COUNT(*)                                              AS trigger_count
+    ,ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER(), 2)     AS pct_of_triggers
+    ,ROUND(AVG(hit_at_5), 4)                               AS avg_hit_at_5
+    ,ROUND(AVG(ndcg_at_5), 4)                              AS avg_ndcg_at_5
+    ,ROUND(MIN(hit_at_5), 4)                               AS min_hit_at_5
+    ,ROUND(MAX(hit_at_5), 4)                               AS max_hit_at_5
+FROM pre_trigger_counts
+GROUP BY visit_history_bucket
+ORDER BY visit_history_bucket
 ;
