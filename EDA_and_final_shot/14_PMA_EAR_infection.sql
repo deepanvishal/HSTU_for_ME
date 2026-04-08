@@ -42,13 +42,15 @@ following_visits AS (
         ,t.member_segment
         ,v.visit_date
         ,v.specialty_ctg_cd
+        ,v.plc_srv_cd
+        ,DATE_DIFF(v.visit_date, t.trigger_date, DAY)      AS days_since_trigger
     FROM qualified_triggers t
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits` v
-        ON  t.member_id  = v.member_id
+        ON  CAST(t.member_id AS STRING) = CAST(v.member_id AS STRING)
         AND v.visit_date = (
             SELECT MIN(v2.visit_date)
             FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits` v2
-            WHERE v2.member_id  = t.member_id
+            WHERE CAST(v2.member_id AS STRING) = CAST(t.member_id AS STRING)
               AND v2.visit_date > t.trigger_date
         )
         AND v.specialty_ctg_cd IS NOT NULL
@@ -81,7 +83,7 @@ joined AS (
          END                                               AS bert_correct
     FROM following_visits f
     LEFT JOIN bert_preds b
-        ON  f.member_id                    = b.member_id
+        ON  CAST(f.member_id AS STRING)    = CAST(b.member_id AS STRING)
         AND CAST(f.trigger_date AS STRING) = b.trigger_date_str
         AND f.trigger_dx                   = b.trigger_dx
 ),
