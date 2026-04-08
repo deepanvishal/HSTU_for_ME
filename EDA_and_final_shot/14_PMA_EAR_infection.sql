@@ -32,27 +32,35 @@ qualified_triggers AS (
       AND is_left_qualified = TRUE
       AND is_t180_qualified = TRUE
 ),
--- Step 2: Immediate next visit date after trigger
--- Find MIN(visit_date) > trigger_date, then get all visits on that date
-following_visits AS (
+-- Step 2a: Find the immediate next visit date per trigger
+next_visit_date AS (
     SELECT
-        t.member_id
+        CAST(t.member_id AS STRING)                        AS member_id
         ,t.trigger_date
         ,t.trigger_dx
         ,t.member_segment
-        ,v.visit_date
-        ,v.specialty_ctg_cd
-        ,v.plc_srv_cd
-        ,DATE_DIFF(v.visit_date, t.trigger_date, DAY)      AS days_since_trigger
+        ,MIN(v.visit_date)                                 AS next_visit_date
     FROM qualified_triggers t
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits` v
         ON  CAST(t.member_id AS STRING) = CAST(v.member_id AS STRING)
-        AND v.visit_date = (
-            SELECT MIN(v2.visit_date)
-            FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits` v2
-            WHERE CAST(v2.member_id AS STRING) = CAST(t.member_id AS STRING)
-              AND v2.visit_date > t.trigger_date
-        )
+        AND v.visit_date > t.trigger_date
+    GROUP BY t.member_id, t.trigger_date, t.trigger_dx, t.member_segment
+),
+-- Step 2b: Get all visits on that next date (multiple specialties allowed)
+following_visits AS (
+    SELECT
+        n.member_id
+        ,n.trigger_date
+        ,n.trigger_dx
+        ,n.member_segment
+        ,v.visit_date
+        ,v.specialty_ctg_cd
+        ,v.plc_srv_cd
+        ,DATE_DIFF(v.visit_date, n.trigger_date, DAY)      AS days_since_trigger
+    FROM next_visit_date n
+    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits` v
+        ON  CAST(n.member_id AS STRING) = CAST(v.member_id AS STRING)
+        AND v.visit_date                = n.next_visit_date
         AND v.specialty_ctg_cd IS NOT NULL
 ),
 -- Step 3: BERT4Rec predictions for H66.91 triggers
