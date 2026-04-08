@@ -32,8 +32,8 @@ qualified_triggers AS (
       AND is_left_qualified = TRUE
       AND is_t180_qualified = TRUE
 ),
--- Step 2: All visits AFTER the trigger date
--- Multiple rows per trigger if member had multiple visits / specialties
+-- Step 2: Immediate next visit date after trigger
+-- Find MIN(visit_date) > trigger_date, then get all visits on that date
 following_visits AS (
     SELECT
         t.member_id
@@ -42,12 +42,15 @@ following_visits AS (
         ,t.member_segment
         ,v.visit_date
         ,v.specialty_ctg_cd
-        ,v.plc_srv_cd
-        ,DATE_DIFF(v.visit_date, t.trigger_date, DAY)      AS days_since_trigger
     FROM qualified_triggers t
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits` v
         ON  t.member_id  = v.member_id
-        AND v.visit_date > t.trigger_date
+        AND v.visit_date = (
+            SELECT MIN(v2.visit_date)
+            FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits` v2
+            WHERE v2.member_id  = t.member_id
+              AND v2.visit_date > t.trigger_date
+        )
         AND v.specialty_ctg_cd IS NOT NULL
 ),
 -- Step 3: BERT4Rec predictions for H66.91 triggers
