@@ -2,12 +2,12 @@
 -- EDA_h6691_transitions.sql
 -- Diagnosis : H66.91 — Otitis media unspecified, right ear
 -- Logic:
---   Step 1 — Qualified triggers: left + right boundary both TRUE
---   Step 2 — Hit visits table for all visits AFTER trigger date
---             (any visit, any date, any specialty)
---   Step 3 — Count transitions per member_segment + specialty
---   Step 4 — Check if BERT4Rec predicted that specialty in top 5
---   Step 5 — Top 5 transitions per member_segment
+--   Step 1 — Qualified triggers: is_left_qualified + is_t180_qualified
+--   Step 2 — Join visits where visit_date > trigger_date
+--             Use MIN window function to find immediate next date
+--             Filter WHERE visit_date = min_next_date
+--   Step 3 — Check BERT4Rec top5 prediction correctness
+--   Step 4 — Top 5 transitions per member_segment
 -- ============================================================
 
 WITH specialty_desc AS (
@@ -16,66 +16,69 @@ WITH specialty_desc AS (
     WHERE next_specialty IS NOT NULL
 ),
 dx_desc AS (
-    SELECT DISTINCT trigger_dx, trigger_ccsr_desc AS trigger_dx_desc
+    SELECT DISTINCT trigger_dx, trigger_ccsr_desc          AS trigger_dx_desc
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_markov_train`
     WHERE trigger_dx = 'H66.91'
 ),
--- Step 1: Qualified triggers — left AND right boundary active
+-- Step 1: Qualified triggers
 qualified_triggers AS (
     SELECT DISTINCT
-        member_id
+        CAST(member_id AS STRING)                          AS member_id
         ,trigger_date
         ,trigger_dx
         ,member_segment
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_triggers_qualified`
-    WHERE trigger_dx       = 'H66.91'
-      AND is_left_qualified = TRUE
-      AND is_t180_qualified = TRUE
+    WHERE trigger_dx        = 'H66.91'
+      AND is_left_qualified  = TRUE
+      AND is_t180_qualified  = TRUE
 ),
--- Step 2a: Find the immediate next visit date per trigger
-next_visit_date AS (
+-- Step 2: Join all visits after trigger, compute min next date as window function
+trigger_visit_pairs AS (
     SELECT
-        CAST(t.member_id AS STRING)                        AS member_id
+        t.member_id
         ,t.trigger_date
         ,t.trigger_dx
         ,t.member_segment
-        ,MIN(v.visit_date)                                 AS next_visit_date
-    FROM qualified_triggers t
-    JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits` v
-        ON  CAST(t.member_id AS STRING) = CAST(v.member_id AS STRING)
-        AND v.visit_date > t.trigger_date
-    GROUP BY t.member_id, t.trigger_date, t.trigger_dx, t.member_segment
-),
--- Step 2b: Get all visits on that next date (multiple specialties allowed)
-following_visits AS (
-    SELECT
-        n.member_id
-        ,n.trigger_date
-        ,n.trigger_dx
-        ,n.member_segment
         ,v.visit_date
         ,v.specialty_ctg_cd
         ,v.plc_srv_cd
-        ,DATE_DIFF(v.visit_date, n.trigger_date, DAY)      AS days_since_trigger
-    FROM next_visit_date n
+        ,DATE_DIFF(v.visit_date, t.trigger_date, DAY)      AS days_since_trigger
+        ,MIN(v.visit_date) OVER (
+            PARTITION BY t.member_id, t.trigger_date, t.trigger_dx
+        )                                                  AS min_next_date
+    FROM qualified_triggers t
     JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_visits` v
-        ON  CAST(n.member_id AS STRING) = CAST(v.member_id AS STRING)
-        AND v.visit_date                = n.next_visit_date
+        ON  t.member_id                    = CAST(v.member_id AS STRING)
+        AND v.visit_date                   > t.trigger_date
         AND v.specialty_ctg_cd IS NOT NULL
 ),
--- Step 3: BERT4Rec predictions for H66.91 triggers
-bert_preds AS (
+-- Keep only visits on the immediate next date
+following_visits AS (
     SELECT
         member_id
+        ,trigger_date
+        ,trigger_dx
+        ,member_segment
+        ,visit_date
+        ,specialty_ctg_cd
+        ,plc_srv_cd
+        ,days_since_trigger
+    FROM trigger_visit_pairs
+    WHERE visit_date = min_next_date
+),
+-- Step 3: BERT4Rec predictions
+bert_preds AS (
+    SELECT
+        CAST(member_id AS STRING)                          AS member_id
         ,trigger_date                                      AS trigger_date_str
         ,trigger_dx
         ,top5_predictions
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_gen_rec_trigger_scores`
-    WHERE model       = 'BERT4Rec'
-      AND trigger_dx  = 'H66.91'
-      AND time_bucket = 'T0_30'
+    WHERE model        = 'BERT4Rec'
+      AND trigger_dx   = 'H66.91'
+      AND time_bucket  = 'T0_30'
 ),
--- Step 4: Join predictions — check if specialty was in top 5
+-- Join predictions and flag correctness
 joined AS (
     SELECT
         f.member_segment
@@ -91,11 +94,11 @@ joined AS (
          END                                               AS bert_correct
     FROM following_visits f
     LEFT JOIN bert_preds b
-        ON  CAST(f.member_id AS STRING)    = CAST(b.member_id AS STRING)
+        ON  f.member_id                    = b.member_id
         AND CAST(f.trigger_date AS STRING) = b.trigger_date_str
         AND f.trigger_dx                   = b.trigger_dx
 ),
--- Step 5: Aggregate + rank top 5 per segment
+-- Step 4: Aggregate and rank top 5 per segment
 ranked AS (
     SELECT
         member_segment
