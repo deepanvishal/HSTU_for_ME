@@ -12,31 +12,30 @@ AS
 
 WITH raw_counties AS (
   -- --------------------------------------------------------
-  -- PULL FLORIDA COUNTY BOUNDARIES + AREA FROM PUBLIC GEO TABLE
+  -- FLORIDA COUNTY BOUNDARIES + AREA
   -- --------------------------------------------------------
   SELECT
-    geo.county_fips_code                                             AS county_fips,
-    geo.county_name,
-    geo.state_fips_code,
-    geo.area_land_meters / 2589988.11                               AS area_sq_miles
-  FROM `bigquery-public-data.geo_us_boundaries.counties` geo
-  WHERE geo.state_fips_code = '12'
+    geo_id                                                           AS county_fips,
+    county_name,
+    area_land_meters / 2589988.11                                   AS area_sq_miles
+  FROM `bigquery-public-data.geo_us_boundaries.counties`
+  WHERE state_fips_code = '12'
 ),
 
 population AS (
   -- --------------------------------------------------------
-  -- PULL FLORIDA COUNTY POPULATION FROM ACS 5-YEAR ESTIMATES
+  -- FLORIDA COUNTY POPULATION FROM ACS 2020 5-YEAR
   -- --------------------------------------------------------
   SELECT
     geo_id                                                           AS county_fips,
     total_pop
   FROM `bigquery-public-data.census_bureau_acs.county_2020_5yr`
-  WHERE state_fips_code = '12'
+  WHERE LEFT(geo_id, 2) = '12'
 ),
 
 joined AS (
   -- --------------------------------------------------------
-  -- JOIN GEO + POPULATION
+  -- JOIN GEO + POPULATION ON geo_id
   -- --------------------------------------------------------
   SELECT
     r.county_fips,
@@ -45,14 +44,13 @@ joined AS (
     r.area_sq_miles,
     ROUND(p.total_pop / NULLIF(r.area_sq_miles, 0), 2)             AS pop_density
   FROM raw_counties r
-  LEFT JOIN population p
-    ON r.county_fips = p.county_fips
+  LEFT JOIN population p USING (county_fips)
 ),
 
 classified AS (
   -- --------------------------------------------------------
   -- APPLY 42 CFR 422.116 COUNTY TYPE CLASSIFICATION RULES
-  -- PRIORITY ORDER: LARGE METRO > METRO > MICRO > RURAL > CEAC
+  -- PRIORITY: LARGE METRO > METRO > MICRO > CEAC > RURAL
   -- --------------------------------------------------------
   SELECT
     county_fips,
@@ -61,22 +59,17 @@ classified AS (
     area_sq_miles,
     pop_density,
     CASE
-      -- LARGE METRO
       WHEN (population >= 1000000 AND pop_density >= 1000)
         OR (population >= 500000  AND pop_density >= 1500)
         OR (pop_density >= 5000)                                     THEN 'Large Metro'
-      -- METRO
       WHEN (population >= 1000000 AND pop_density >= 10)
         OR (population >= 500000  AND pop_density >= 10)
         OR (population >= 200000  AND pop_density >= 10)
         OR (population >= 50000   AND pop_density >= 100)
         OR (population >= 10000   AND pop_density >= 1000)          THEN 'Metro'
-      -- MICRO
       WHEN (population >= 50000   AND pop_density >= 10)
         OR (population >= 10000   AND pop_density >= 50)            THEN 'Micro'
-      -- CEAC (check before rural - density < 10 wins regardless of pop)
       WHEN pop_density < 10                                          THEN 'CEAC'
-      -- RURAL
       WHEN (population >= 10000   AND pop_density >= 10)
         OR (population < 10000    AND pop_density >= 50)            THEN 'Rural'
       ELSE 'Rural'
