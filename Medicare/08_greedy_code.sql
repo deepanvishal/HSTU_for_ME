@@ -800,13 +800,12 @@ ORDER BY z.zip_code;
 
 -- ============================================================
 -- TABLE 6: stg_beneficiaries
--- PURPOSE: BENEFICIARY DEMAND BY ZIP CODE FOR FLORIDA
--- SOURCE:  bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr
---          A870800_medicare_supply_demand_ref_zip_reference
---          anbc-hcb-prod cms_medicare_penetration (county validation)
+-- PURPOSE: DEMAND SIDE - ZIP LEVEL POPULATION FOR FLORIDA
+-- SOURCE:  A870800_medicare_supply_demand_ref_zip_reference
+--          anbc-hcb-prod cms_medicare_penetration (county context only)
 -- GRAIN:   zip_code
--- NOTE:    PRIMARY DEMAND = ACS 2018 zip population
---          CMS PENETRATION = county level validation/context only
+-- NOTE:    lat/long NOT stored here - joined from ref_zip_reference
+--          at distance matrix stage only
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_beneficiaries`
@@ -816,7 +815,7 @@ AS
 WITH latest_penetration AS (
   -- --------------------------------------------------------
   -- GET MOST RECENT CMS PENETRATION FILE
-  -- USED FOR COUNTY LEVEL VALIDATION CONTEXT ONLY
+  -- COUNTY LEVEL CONTEXT ONLY - NOT PRIMARY DEMAND INPUT
   -- --------------------------------------------------------
   SELECT MAX(ingest_time) AS max_ingest
   FROM `anbc-hcb-prod.provider_ds_netconf_data_hcb_prod.cms_medicare_penetration`
@@ -832,7 +831,6 @@ county_penetration AS (
       LPAD(CAST(fipsst   AS STRING), 2, '0'),
       LPAD(CAST(fipscnty AS STRING), 3, '0')
     )                                                                AS county_fips,
-    county_name,
     eligibles                                                        AS county_eligibles,
     enrolled                                                         AS county_ma_enrolled,
     SAFE_CAST(REPLACE(penetration, '%', '') AS FLOAT64) / 100       AS county_penetration_rate,
@@ -845,20 +843,13 @@ county_penetration AS (
 
 SELECT
   z.zip_code,
-  z.zip_lat,
-  z.zip_long,
-  z.zip_centroid,
-  z.zip_radius_miles,
-  z.area_sq_miles,
   z.zip_population                                                   AS total_population,
+  z.zip_radius_miles,
   z.county_fips,
   z.county_name,
   z.county_type,
   z.compliance_threshold,
-  z.county_radius_miles,
-  z.county_lat,
-  z.county_long,
-  -- county level cms context columns
+  -- county level cms context for gap calculation denominator
   p.county_eligibles,
   p.county_ma_enrolled,
   p.county_penetration_rate,
