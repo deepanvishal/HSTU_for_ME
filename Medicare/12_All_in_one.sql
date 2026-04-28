@@ -8,7 +8,7 @@
 -- DATE:     2026-04-21
 -- SCOPE:    FLORIDA COUNTIES ONLY
 -- ============================================================
-
+-- https://www.cms.gov/files/document/2026-hsd-reference-file-updated-12-17-2025.xlsx
 
 -- ============================================================
 -- TABLE 1: ref_specialty_crosswalk
