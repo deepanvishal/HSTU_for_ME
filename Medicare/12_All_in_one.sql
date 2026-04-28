@@ -1342,13 +1342,37 @@ SELECT
   r.pct_covered,
   r.compliance_threshold,
 
-  -- required provider count per 422.116
-  CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)           AS required_provider_count,
+  -- --------------------------------------------------------
+  -- REQUIRED PROVIDER COUNT PER 422.116
+  -- FACILITY TYPES b(2)(ii) THROUGH b(2)(xiv) = MINIMUM 1 FLAT
+  -- PROVIDER TYPES + ACUTE INPATIENT HOSPITAL = RATIO BASED
+  -- --------------------------------------------------------
+  CASE
+    WHEN r.cms_specialty IN (
+      'Cardiac Surgery Program', 'Cardiac Catheterization',
+      'Critical Care ICU', 'Surgical Services ASC',
+      'Skilled Nursing Facility', 'Diagnostic Radiology',
+      'Mammography', 'Physical Therapy', 'Occupational Therapy',
+      'Speech Therapy', 'Inpatient Psychiatric',
+      'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
+    ) THEN 1
+    ELSE CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
+  END                                                                AS required_provider_count,
   r.actual_provider_count,
 
   -- gap: positive = shortage, negative = surplus
-  CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
-    - r.actual_provider_count                                        AS provider_gap,
+  CASE
+    WHEN r.cms_specialty IN (
+      'Cardiac Surgery Program', 'Cardiac Catheterization',
+      'Critical Care ICU', 'Surgical Services ASC',
+      'Skilled Nursing Facility', 'Diagnostic Radiology',
+      'Mammography', 'Physical Therapy', 'Occupational Therapy',
+      'Speech Therapy', 'Inpatient Psychiatric',
+      'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
+    ) THEN 1 - r.actual_provider_count
+    ELSE CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
+         - r.actual_provider_count
+  END                                                                AS provider_gap,
 
   -- test 1: % beneficiaries with access >= threshold
   CASE
@@ -1358,16 +1382,35 @@ SELECT
 
   -- test 2: actual provider count >= required count
   CASE
-    WHEN r.actual_provider_count >=
-         CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)    THEN TRUE
-    ELSE FALSE
+    WHEN r.cms_specialty IN (
+      'Cardiac Surgery Program', 'Cardiac Catheterization',
+      'Critical Care ICU', 'Surgical Services ASC',
+      'Skilled Nursing Facility', 'Diagnostic Radiology',
+      'Mammography', 'Physical Therapy', 'Occupational Therapy',
+      'Speech Therapy', 'Inpatient Psychiatric',
+      'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
+    ) THEN r.actual_provider_count >= 1
+    ELSE r.actual_provider_count >=
+         CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
   END                                                                AS count_compliant,
 
   -- overall: both tests must pass per 422.116
   CASE
     WHEN r.pct_covered >= r.compliance_threshold
-    AND  r.actual_provider_count >=
-         CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)    THEN 'COMPLIANT'
+    AND (
+      CASE
+        WHEN r.cms_specialty IN (
+          'Cardiac Surgery Program', 'Cardiac Catheterization',
+          'Critical Care ICU', 'Surgical Services ASC',
+          'Skilled Nursing Facility', 'Diagnostic Radiology',
+          'Mammography', 'Physical Therapy', 'Occupational Therapy',
+          'Speech Therapy', 'Inpatient Psychiatric',
+          'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
+        ) THEN r.actual_provider_count >= 1
+        ELSE r.actual_provider_count >=
+             CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
+      END
+    )                                                                THEN 'COMPLIANT'
     ELSE 'NON-COMPLIANT'
   END                                                                AS compliance_status
 
