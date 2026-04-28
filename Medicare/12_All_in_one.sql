@@ -1216,17 +1216,11 @@ GROUP BY
 -- ============================================================
 -- TABLE 10: fact_gap_analysis
 -- PURPOSE: COUNTY LEVEL COMPLIANCE ROLLUP
---          % BENEFICIARIES WITH ACCESS vs CMS THRESHOLD
---          ACTUAL vs REQUIRED PROVIDER COUNT
---          FINAL COMPLIANCE FLAG PER COUNTY x SPECIALTY x PLAN TYPE
 -- SOURCE:  fact_zip_access
---          ref_min_ratio
+--          ref_hsd_required_counts (CMS 2026 HSD - exact required counts)
 --          stg_beneficiaries
 --          ref_specialty_crosswalk
 -- GRAIN:   county_fips x cms_specialty x plan_type
--- NOTE:    LEFT JOIN from all zip x specialty x plan_type combinations
---          ensures zips with ZERO providers are included as NO_ACCESS
---          county_eligibles cast to FLOAT64 for ratio calculation
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_fact_gap_analysis`
@@ -1237,7 +1231,6 @@ WITH all_combinations AS (
   -- --------------------------------------------------------
   -- BUILD COMPLETE GRID:
   -- ALL BENE ZIPS x ALL CMS SPECIALTIES x ALL PLAN TYPES
-  -- ENSURES ZERO ACCESS ZIPS ARE NOT SILENTLY DROPPED
   -- --------------------------------------------------------
   SELECT
     b.zip_code,
@@ -1246,7 +1239,6 @@ WITH all_combinations AS (
     b.county_type,
     b.compliance_threshold,
     b.total_population,
-    b.county_eligibles,
     sc.cms_specialty,
     sc.match_type,
     sc.inflated,
@@ -1264,7 +1256,7 @@ WITH all_combinations AS (
 
 zip_access_complete AS (
   -- --------------------------------------------------------
-  -- LEFT JOIN FACT_ZIP_ACCESS TO ALL_COMBINATIONS
+  -- LEFT JOIN FACT_ZIP_ACCESS
   -- FILLS IN ZEROS FOR ZIPS WITH NO PROVIDERS WITHIN THRESHOLD
   -- --------------------------------------------------------
   SELECT
@@ -1274,7 +1266,6 @@ zip_access_complete AS (
     a.county_type,
     a.compliance_threshold,
     a.total_population,
-    a.county_eligibles,
     a.cms_specialty,
     a.match_type,
     a.inflated,
@@ -1283,7 +1274,7 @@ zip_access_complete AS (
     COALESCE(z.has_access, FALSE)                                    AS has_access
   FROM all_combinations a
   LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_fact_zip_access` z
-    ON a.zip_code      = z.bene_zip
+    ON a.zip_code       = z.bene_zip
     AND a.cms_specialty = z.cms_specialty
     AND a.plan_type     = z.plan_type
 ),
@@ -1301,17 +1292,12 @@ county_rollup AS (
     plan_type,
     inflated,
     match_type,
-    -- cast county_eligibles to FLOAT64 for ratio calculation
-    MAX(SAFE_CAST(REPLACE(CAST(county_eligibles AS STRING), ',', '') AS FLOAT64)) AS county_eligibles,
     SUM(total_population)                                            AS total_county_population,
-    -- population in zips WITH at least 1 provider within threshold
     SUM(CASE WHEN has_access THEN total_population ELSE 0 END)      AS population_with_access,
-    -- pct of county population with access
     ROUND(
       SUM(CASE WHEN has_access THEN total_population ELSE 0 END)
       / NULLIF(SUM(total_population), 0)
     , 4)                                                             AS pct_covered,
-    -- distinct providers within threshold across all zips in county
     SUM(provider_count)                                              AS actual_provider_count
   FROM zip_access_complete
   GROUP BY
@@ -1326,7 +1312,9 @@ county_rollup AS (
 )
 
 -- --------------------------------------------------------
--- FINAL OUTPUT WITH COMPLIANCE FLAGS
+-- FINAL OUTPUT
+-- required_count from CMS HSD file directly
+-- no approximation, no ratio calculation
 -- --------------------------------------------------------
 SELECT
   r.county_fips,
@@ -1336,88 +1324,37 @@ SELECT
   r.plan_type,
   r.inflated,
   r.match_type,
-  r.county_eligibles,
+  hsd.total_beneficiaries                                            AS county_total_beneficiaries,
+  hsd.beneficiaries_required_to_cover,
+  hsd.ratio_95th_percentile,
   r.total_county_population,
   r.population_with_access,
   r.pct_covered,
   r.compliance_threshold,
-
-  -- --------------------------------------------------------
-  -- REQUIRED PROVIDER COUNT PER 422.116
-  -- FACILITY TYPES b(2)(ii) THROUGH b(2)(xiv) = MINIMUM 1 FLAT
-  -- PROVIDER TYPES + ACUTE INPATIENT HOSPITAL = RATIO BASED
-  -- --------------------------------------------------------
-  CASE
-    WHEN r.cms_specialty IN (
-      'Cardiac Surgery Program', 'Cardiac Catheterization',
-      'Critical Care ICU', 'Surgical Services ASC',
-      'Skilled Nursing Facility', 'Diagnostic Radiology',
-      'Mammography', 'Physical Therapy', 'Occupational Therapy',
-      'Speech Therapy', 'Inpatient Psychiatric',
-      'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
-    ) THEN 1
-    ELSE CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
-  END                                                                AS required_provider_count,
+  hsd.required_count                                                 AS required_provider_count,
   r.actual_provider_count,
-
-  -- gap: positive = shortage, negative = surplus
-  CASE
-    WHEN r.cms_specialty IN (
-      'Cardiac Surgery Program', 'Cardiac Catheterization',
-      'Critical Care ICU', 'Surgical Services ASC',
-      'Skilled Nursing Facility', 'Diagnostic Radiology',
-      'Mammography', 'Physical Therapy', 'Occupational Therapy',
-      'Speech Therapy', 'Inpatient Psychiatric',
-      'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
-    ) THEN 1 - r.actual_provider_count
-    ELSE CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
-         - r.actual_provider_count
-  END                                                                AS provider_gap,
-
-  -- test 1: % beneficiaries with access >= threshold
+  hsd.required_count - r.actual_provider_count                      AS provider_gap,
+  -- test 1: access
   CASE
     WHEN r.pct_covered >= r.compliance_threshold THEN TRUE
     ELSE FALSE
   END                                                                AS access_compliant,
-
-  -- test 2: actual provider count >= required count
+  -- test 2: count
   CASE
-    WHEN r.cms_specialty IN (
-      'Cardiac Surgery Program', 'Cardiac Catheterization',
-      'Critical Care ICU', 'Surgical Services ASC',
-      'Skilled Nursing Facility', 'Diagnostic Radiology',
-      'Mammography', 'Physical Therapy', 'Occupational Therapy',
-      'Speech Therapy', 'Inpatient Psychiatric',
-      'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
-    ) THEN r.actual_provider_count >= 1
-    ELSE r.actual_provider_count >=
-         CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
+    WHEN r.actual_provider_count >= hsd.required_count THEN TRUE
+    ELSE FALSE
   END                                                                AS count_compliant,
-
-  -- overall: both tests must pass per 422.116
+  -- overall
   CASE
     WHEN r.pct_covered >= r.compliance_threshold
-    AND (
-      CASE
-        WHEN r.cms_specialty IN (
-          'Cardiac Surgery Program', 'Cardiac Catheterization',
-          'Critical Care ICU', 'Surgical Services ASC',
-          'Skilled Nursing Facility', 'Diagnostic Radiology',
-          'Mammography', 'Physical Therapy', 'Occupational Therapy',
-          'Speech Therapy', 'Inpatient Psychiatric',
-          'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
-        ) THEN r.actual_provider_count >= 1
-        ELSE r.actual_provider_count >=
-             CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
-      END
-    )                                                                THEN 'COMPLIANT'
+    AND  r.actual_provider_count >= hsd.required_count               THEN 'COMPLIANT'
     ELSE 'NON-COMPLIANT'
   END                                                                AS compliance_status
 
 FROM county_rollup r
-JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_min_ratio` m
-  ON m.cms_specialty = r.cms_specialty
-  AND m.county_type  = r.county_type
+JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_hsd_required_counts` hsd
+  ON hsd.county_name  = r.county_name
+  AND hsd.cms_specialty = r.cms_specialty
 ORDER BY
   r.county_name,
   r.cms_specialty,
