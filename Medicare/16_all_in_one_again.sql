@@ -30,16 +30,13 @@
 --         Aetna codes and vice versa.
 -- WHY:    Aetna and CMS use different specialty coding systems.
 --         This crosswalk is the bridge for all downstream joins.
--- FLAGS:  match_type = 'exact' (direct match) or 'proxy' (best available)
---         inflated = TRUE means one Aetna code maps to multiple CMS
---         specialties — provider counts will be inflated for these
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_specialty_crosswalk`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
 SELECT * FROM UNNEST([
-  STRUCT('Primary Care'                  AS cms_specialty, 'FP'   AS aetna_cd, 'exact'  AS match_type, FALSE AS inflated),
+  STRUCT('Primary Care'                  AS cms_specialty, 'FP'   AS aetna_cd),
   STRUCT('Primary Care',                                   'I',               'exact',               FALSE),
   STRUCT('Allergy and Immunology',                         'A',               'exact',               FALSE),
   STRUCT('Cardiology',                                     'C',               'exact',               FALSE),
@@ -549,7 +546,7 @@ OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
 SELECT * FROM UNNEST([
   -- exact matches (38 counties)
-  STRUCT('Alachua'      AS aetna_county_nm, 'Alachua'      AS census_county_nm, '12001' AS county_fips, 'exact'      AS match_type),
+  STRUCT('Alachua'      AS aetna_county_nm, 'Alachua'      AS census_county_nm, '12001' AS county_fips),
   STRUCT('Baker',                           'Baker',                             '12003',               'exact'),
   STRUCT('Brevard',                         'Brevard',                           '12009',               'exact'),
   STRUCT('Broward',                         'Broward',                           '12011',               'exact'),
@@ -848,8 +845,6 @@ SELECT
   s.specialty_ctg_cd                                                AS aetna_specialty_cd,
   s.specialty_ctg_cd_desc,
   sc.cms_specialty,
-  sc.match_type,
-  sc.inflated,
   s.county_nm                                                        AS aetna_county_nm,
   c.census_county_nm,
   c.county_fips,
@@ -912,8 +907,6 @@ WITH zip_provider_pairs AS (
     p.provider_id,
     p.cms_specialty,
     p.plan_type,
-    p.inflated,
-    p.match_type,
     t.max_distance_miles,
     ROUND(
       ST_DISTANCE(
@@ -945,8 +938,6 @@ SELECT
   bene_zip_radius,
   cms_specialty,
   plan_type,
-  inflated,
-  match_type,
   max_distance_miles,
   COUNT(DISTINCT provider_id)                                        AS provider_count_within_threshold,
   TRUE                                                               AS has_access
@@ -961,8 +952,6 @@ GROUP BY
   bene_zip_radius,
   cms_specialty,
   plan_type,
-  inflated,
-  match_type,
   max_distance_miles;
 
 
@@ -1002,12 +991,10 @@ WITH all_combinations AS (
     b.compliance_threshold,
     b.total_population,
     sc.cms_specialty,
-    sc.match_type,
-    sc.inflated,
     pt.plan_type
   FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_beneficiaries` b
   CROSS JOIN (
-    SELECT DISTINCT cms_specialty, match_type, inflated
+    SELECT DISTINCT cms_specialty
     FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_specialty_crosswalk`
   ) sc
   CROSS JOIN (
@@ -1027,8 +1014,6 @@ zip_access_complete AS (
     a.compliance_threshold,
     a.total_population,
     a.cms_specialty,
-    a.match_type,
-    a.inflated,
     a.plan_type,
     COALESCE(z.provider_count_within_threshold, 0)                  AS provider_count,
     COALESCE(z.has_access, FALSE)                                    AS has_access
@@ -1049,8 +1034,6 @@ county_rollup AS (
     compliance_threshold,
     cms_specialty,
     plan_type,
-    inflated,
-    match_type,
     SUM(total_population)                                            AS total_county_population,
     SUM(CASE WHEN has_access THEN total_population ELSE 0 END)      AS population_with_access,
     ROUND(
@@ -1066,8 +1049,25 @@ county_rollup AS (
     compliance_threshold,
     cms_specialty,
     plan_type,
-    inflated,
-    match_type
+),
+
+hospital_beds AS (
+  -- --------------------------------------------------------
+  -- SUM CONTRACTED BEDS PER COUNTY FOR ACUTE INPATIENT ONLY
+  -- SOURCE: hosp_list_cmi (Pin = provider_id, Beds = bed count)
+  -- CMS requires 12.2 beds per 1,000 beneficiaries
+  -- NULL beds excluded - unknown bed count not credited
+  -- --------------------------------------------------------
+  SELECT
+    p.county_fips,
+    p.plan_type,
+    SUM(CAST(h.Beds AS INT64))                                       AS total_contracted_beds
+  FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_providers_multi_specialty` p
+  JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.hosp_list_cmi` h
+    ON CAST(p.provider_id AS STRING) = CAST(h.Pin AS STRING)
+  WHERE p.cms_specialty = 'Acute Inpatient Hospitals'
+    AND h.Beds IS NOT NULL
+  GROUP BY p.county_fips, p.plan_type
 )
 
 SELECT
@@ -1076,8 +1076,6 @@ SELECT
   r.county_type,
   r.cms_specialty,
   r.plan_type,
-  r.inflated,
-  r.match_type,
   hsd.total_beneficiaries                                            AS county_total_beneficiaries,
   hsd.beneficiaries_required_to_cover,
   hsd.ratio_95th_percentile,
@@ -1086,29 +1084,49 @@ SELECT
   r.pct_covered,
   r.compliance_threshold,
   hsd.required_count                                                 AS required_provider_count,
-  r.actual_provider_count,
-  hsd.required_count - r.actual_provider_count                      AS provider_gap,
+  -- actual count: beds for hospitals, provider count for everything else
+  CASE
+    WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
+      THEN COALESCE(b.total_contracted_beds, 0)
+    ELSE r.actual_provider_count
+  END                                                                AS actual_count,
+  -- gap: beds vs required for hospitals, providers vs required for others
+  CASE
+    WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
+      THEN hsd.required_count - COALESCE(b.total_contracted_beds, 0)
+    ELSE hsd.required_count - r.actual_provider_count
+  END                                                                AS provider_gap,
   -- test 1: % beneficiaries with access >= compliance threshold
   CASE
     WHEN r.pct_covered >= r.compliance_threshold THEN TRUE
     ELSE FALSE
   END                                                                AS access_compliant,
-  -- test 2: actual provider count >= CMS required count
+  -- test 2: beds >= required for hospitals, providers >= required for others
   CASE
-    WHEN r.actual_provider_count >= hsd.required_count THEN TRUE
-    ELSE FALSE
+    WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
+      THEN COALESCE(b.total_contracted_beds, 0) >= hsd.required_count
+    ELSE r.actual_provider_count >= hsd.required_count
   END                                                                AS count_compliant,
   -- overall: both tests must pass per 42 CFR 422.116
   CASE
     WHEN r.pct_covered >= r.compliance_threshold
-    AND  r.actual_provider_count >= hsd.required_count               THEN 'COMPLIANT'
+    AND (
+      CASE
+        WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
+          THEN COALESCE(b.total_contracted_beds, 0) >= hsd.required_count
+        ELSE r.actual_provider_count >= hsd.required_count
+      END
+    )                                                                THEN 'COMPLIANT'
     ELSE 'NON-COMPLIANT'
   END                                                                AS compliance_status
 
 FROM county_rollup r
 JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_hsd_required_counts` hsd
-  ON hsd.county_name   = r.county_name
+  ON hsd.county_name    = r.county_name
   AND hsd.cms_specialty = r.cms_specialty
+LEFT JOIN hospital_beds b
+  ON r.county_fips  = b.county_fips
+  AND r.plan_type   = b.plan_type
 ORDER BY
   r.county_name,
   r.cms_specialty,
