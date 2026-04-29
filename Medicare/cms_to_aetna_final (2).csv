@@ -1,0 +1,328 @@
+cms_specialty,aetna_code,aetna_description
+Acute Inpatient Hospitals,2HSLT,Hospitalist
+Acute Inpatient Hospitals,2SH,Specialty Hospital
+Acute Inpatient Hospitals,91002,Hospitalist
+Acute Inpatient Hospitals,HO,Acute Short Term Hospital
+Acute Inpatient Hospitals,HSLT,Hospitalist
+Acute Inpatient Hospitals,LHO,Long Term Acute Care Hospital
+Allergy and Immunology,10326,Allergy/Immunology
+Allergy and Immunology,10501,Allergy & Immunology
+Allergy and Immunology,10603,Dermatological Immunology/Diag
+Allergy and Immunology,2A,Allergy
+Allergy and Immunology,2AIM,Immunology
+Allergy and Immunology,2ENA,Otolaryngology/Allergy
+Allergy and Immunology,90003,Allergy
+Allergy and Immunology,90335,Immunology
+Allergy and Immunology,90386,Otolaryngology/Allergy
+Cardiac Catheterization,10302,Cardiac Electrophysiology
+Cardiac Catheterization,10332,Interventional Cardiology
+Cardiac Catheterization,2CEP,Cardiac Electrophysiology
+Cardiac Catheterization,91205,Cardiac Monitoring Service
+Cardiac Surgery Program,2CS,Cardiothoracic/Cardiovascular
+Cardiac Surgery Program,91046,Cardiac Valve Replacement
+Cardiac Surgery Program,91205,Cardiac Monitoring Service
+Cardiac Surgery Program,91206,Cardiac Surgery Program
+Cardiology,10302,Cardiac Electrophysiology
+Cardiology,10303,Cardiovascular Disease
+Cardiology,10322,Cardiology
+Cardiology,10332,Interventional Cardiology
+Cardiology,10339,Cardiology Adv Heart Failure/
+Cardiology,2C,Cardiology
+Cardiology,2CEP,Cardiac Electrophysiology
+Cardiology,2CI,Cardiology (Invasive)
+Cardiology,2CS,Cardiothoracic/Cardiovascular
+Cardiology,40312,Nuclear Cardiology
+Cardiology,90313,Cardiology (Invasive)
+Cardiology,91046,Cardiac Valve Replacement
+Cardiology,91205,Cardiac Monitoring Service
+Cardiothoracic Surgery,2CS,Cardiothoracic/Cardiovascular
+Cardiothoracic Surgery,2TS,Thoracic Surgery
+Cardiothoracic Surgery,30805,Surgery Thoracic Cardiovascul
+Cardiothoracic Surgery,30812,Surgery Congenital Cardiac/Th
+Cardiothoracic Surgery,30901,Surgery Thoracic
+Cardiothoracic Surgery,91206,Cardiac Surgery Program
+Cardiothoracic Surgery,91215,Heart Transplant Program
+Chiropractor,2CH,Chiropractics
+Chiropractor,91146,Chiropractics
+Chiropractor,DC,Chiropractor
+Clinical Psychology,2NPH,Neuropsychology
+Clinical Psychology,2PHGR,Geriatric Psychology
+Clinical Psychology,91018,Psychological Testing
+Clinical Psychology,91029,Neuropsych Testing
+Clinical Psychology,CP,Clinical Psychologist
+Clinical Psychology,NPS,Neuropsychologist
+Clinical Social Work,2MLS,Social Worker Masters Licensed
+Clinical Social Work,2MUS,Social Worker(Masters w/o Lic)
+Clinical Social Work,2PYSW,Psychiatric Social Worker
+Clinical Social Work,90371,Psychiatric Social Worker
+Clinical Social Work,91207,Certified Social Work
+Clinical Social Work,SW,Clinical Social Worker
+Critical Care ICU,10304,Critical Care Medicine
+Critical Care ICU,11016,Neurocritical Care
+Critical Care ICU,20102,Critical Care Medicine/Obstetr
+Critical Care ICU,2CCM,Critical Care Medicine
+Critical Care ICU,30102,Critical Care Medicine/Anesthe
+Critical Care ICU,30302,Critical Care Medicine Neurolo
+Critical Care ICU,30803,Surgery Critical care
+Critical Care ICU,91125,Trauma Surgical Critical Care
+Critical Care ICU,91165,Intensive Care Coordination
+Dermatology,10601,Dermatology
+Dermatology,10602,Dermatopathology/Dermatology
+Dermatology,2D,Dermatology
+Dermatology,2DP,Dermatopathology
+Dermatology,40207,Dermatopathology/Pathology
+Diagnostic Radiology,40306,Diagnostic Roentgenology
+Diagnostic Radiology,40311,Neuroradiology
+Diagnostic Radiology,40313,Nuclear Imaging and Therapy
+Diagnostic Radiology,40315,Diagnostic Ultrasound
+Diagnostic Radiology,40320,Body Imaging
+Diagnostic Radiology,91224,Medical Imaging
+Diagnostic Radiology,RFA,Radiology Center
+ENT/Otolaryngology,14601,Neurotology
+ENT/Otolaryngology,2EN,Otolaryngology
+ENT/Otolaryngology,2ENA,Otolaryngology/Allergy
+ENT/Otolaryngology,2ENHN,Otolaryngology(Head&Neck) Su
+ENT/Otolaryngology,2ENN,Neuro-Otology
+ENT/Otolaryngology,30601,Otolaryngology
+ENT/Otolaryngology,30603,Otorhinolaryngology & Oro-Faci
+ENT/Otolaryngology,30604,Otorhinolaryngology/Plastic Su
+ENT/Otolaryngology,30605,Otology
+ENT/Otolaryngology,30607,Otorhinolaryngology
+ENT/Otolaryngology,30608,Otology/Neurotology
+ENT/Otolaryngology,30806,Surgery Head & Neck
+ENT/Otolaryngology,90386,Otolaryngology/Allergy
+ENT/Otolaryngology,91061,ENT Trauma
+ENT/Otolaryngology,91078,Otolaryngology (ENT) Cancer Su
+ENT/Otolaryngology,91117,Sleep Medicine (Otolaryngology)
+Endocrinology,10306,Endocrinology Diabetes & Meta
+Endocrinology,10319,Endocrinology
+Endocrinology,20105,Endocrinology Reproductive
+Endocrinology,2E,Endocrinology
+Endocrinology,91059,Endocrine Surgery
+Gastroenterology,10307,Gastroenterology
+Gastroenterology,2G,Gastroenterology
+Gastroenterology,91045,Capsule Endoscopy
+Gastroenterology,91060,Endoscopic Ultrasound
+Gastroenterology,91063,Endoscopic Retrograde Cholangi
+Gastroenterology,91065,Esophageal Motility Disorders
+General Surgery,2S,Surgery (General)
+General Surgery,30201,"Surgery, Colon & Rectal"
+General Surgery,30804,Surgery General Vascular
+General Surgery,30809,Surgery Hand
+Gynecology OB/GYN,20104,Maternal & Fetal Medicine
+Gynecology OB/GYN,20106,Gynecology
+Gynecology OB/GYN,20107,Perinatology
+Gynecology OB/GYN,20108,Obstetrics & Gynecology - CA P
+Gynecology OB/GYN,20109,Obstetrics/Gynecology Hospice
+Gynecology OB/GYN,20110,Female Pelvic Medicine & Recon
+Gynecology OB/GYN,20191,Obstetrics & Gynecology
+Gynecology OB/GYN,2NPOG,Nurse practitioner (ob/gyn)
+Gynecology OB/GYN,2OG,Ob/Gyn
+Gynecology OB/GYN,2OGOB,Obstetrics
+Gynecology OB/GYN,2OH,Perinatology
+Gynecology OB/GYN,2PAOG,Physicians Assistant Ob/Gyn
+Gynecology OB/GYN,2UGY,Uro-gynecology
+Gynecology OB/GYN,30807,Surgery Obstetrics & Gynecolo
+Gynecology OB/GYN,90069,Perinatology/PF
+Gynecology OB/GYN,90355,Obstetrics
+Gynecology OB/GYN,90398,Uro-Gynecology
+Infectious Diseases,10310,Infectious Disease
+Infectious Diseases,2III,Infectious Disease
+Infectious Diseases,91158,Infectious Disease Focus
+Inpatient Psychiatric,91003,Psychotic Disorders
+Inpatient Psychiatric,RTF,Residential Treatment Facility
+Mammography,91223,Mammography
+Nephrology,10312,Nephrology
+Nephrology,2HD,Hemodialysis
+Nephrology,2N,Nephrology
+Nephrology,91217,Hemodialysis
+Nephrology,91220,Kidney Transplant Program
+Nephrology,DI,Dialysis Center
+Neurology,10334,Vascular Neurology
+Neurology,10806,Neuromuscular Medicine Physica
+Neurology,11002,Neurology
+Neurology,11006,Neurology & Psychiatry
+Neurology,11008,Neurology Chemical
+Neurology,11014,Neurology/Psychiatry Hospice
+Neurology,11015,Sleep Medicine - Neurology
+Neurology,11102,Neuromuscular Medicine Psychia
+Neurology,11103,Epilepsy
+Neurology,2NE,Neurology
+Neurology,91044,Botox injections Neurology
+Neurology,91062,Epilepsy Surgery
+Neurology,91081,Movement Disorders
+Neurology,91082,Multiple Sclerosis
+Neurology,91084,Neuromuscular Medicine
+Neurology,91086,Neurovascular Surgery
+Neurology,91149,Sleep Medicine-Neurology
+Neurosurgery,10803,Spinal Cord Injury Medicine
+Neurosurgery,2NS,Neurosurgery
+Neurosurgery,2NSS,Neurosurgery (Spine)
+Neurosurgery,30301,"Surgery, Neurological"
+Neurosurgery,90348,Neurosurgery (Spine)
+Neurosurgery,91118,Spinal Cord Stimulation
+Neurosurgery,91119,Stereotactic & Functional Neur
+Occupational Therapy,2TO,Occupational Therapy
+Occupational Therapy,91142,Occupational Therapy
+Oncology Medical/Surgical,10309,Hematology
+Oncology Medical/Surgical,10311,Oncology Medical
+Oncology Medical/Surgical,10315,Hematology/Oncology
+Oncology Medical/Surgical,20103,Oncology Gynecologic
+Oncology Medical/Surgical,30810,Surgery Oncology
+Oncology Medical/Surgical,91085,Neuro-Oncology
+Oncology Medical/Surgical,91126,Urologic Oncology
+Oncology Medical/Surgical,91129,Surgery Carcinoid
+Oncology Radiation,2RO,Radiation Therapy
+Oncology Radiation,40303,Radiation Oncology
+Oncology Radiation,40304,Radiological Physics
+Oncology Radiation,40310,Therapeutic Radiology
+Oncology Radiation,40316,Radiation Therapy
+Oncology Radiation,40318,Radium Therapy
+Ophthalmology,2O,Ophthalmology
+Ophthalmology,2OAG,Anterior Segment (Glaucoma)
+Ophthalmology,2OC,Corneal Specialist
+Ophthalmology,2PSOC,Oculoplastic Surgery
+Ophthalmology,2RS,Retinal Specialist
+Ophthalmology,30401,Opthalmology
+Ophthalmology,30402,Retinal Opthalmology
+Ophthalmology,30403,Sleep Medicine-Ophthalmology/O
+Ophthalmology,90089,Retinal Specialist
+Ophthalmology,90311,Anterior Segment (Glaucoma)
+Ophthalmology,90315,Corneal Specialist
+Ophthalmology,90343,Neuro-Ophthalmology
+Ophthalmology,90356,Oculoplastic Surgery
+Ophthalmology,91070,Glaucoma Service
+Ophthalmology,91087,Ophthamologic Cancer
+Ophthalmology,91088,Orbital Surgery
+Orthopedic Surgery,10317,Oncology Orthopedic
+Orthopedic Surgery,2OR,Orthopedics
+Orthopedic Surgery,2ORFA,Orthopedics (Foot & Ankle)
+Orthopedic Surgery,2ORON,Orthopedics (Oncology)
+Orthopedic Surgery,2ORR,Orthopedics (Joint Replacement
+Orthopedic Surgery,2ORS,Orthopedics Surgery (Spine)
+Orthopedic Surgery,2ORSM,Orthopedics (Sports Medicine)
+Orthopedic Surgery,30501,Surgery Orthopedic
+Orthopedic Surgery,30502,Surgery Hand/Orthopedic
+Orthopedic Surgery,30503,Surgery Knee
+Orthopedic Surgery,90361,Orthopedics (Foot & Ankle)
+Orthopedic Surgery,90362,Orthopedics (Joint Replacement
+Orthopedic Surgery,90365,Orthopedics Surgery (Spine)
+Orthopedic Surgery,91092,Orthopedic Elbow Replacement
+Orthopedic Surgery,91093,Orthopedic Trauma
+Orthopedic Surgery,91094,Orthopedic Shoulder
+Outpatient Behavioral Health,10204,Addiction Medicine
+Outpatient Behavioral Health,11007,Addictionology
+Outpatient Behavioral Health,11011,Addiction Psychiatry
+Outpatient Behavioral Health,2AC,Addictions Counselor
+Outpatient Behavioral Health,2MH,Mental Health-Substance Abuse
+Outpatient Behavioral Health,90001,Addictions Counselor
+Outpatient Behavioral Health,90428,Mental Health
+Outpatient Behavioral Health,91005,Dialectic Behavioral Therapy
+Outpatient Behavioral Health,91006,Cognitive Behavioral Therapy
+Outpatient Behavioral Health,91011,Substance Abuse Professional
+Outpatient Behavioral Health,91012,Crisis Intervention
+Outpatient Behavioral Health,91032,Applied Behavioral Analysis
+Outpatient Behavioral Health,91134,Behavioral Health Rehabilitati
+Outpatient Behavioral Health,91174,Mobile Crisis Intervention (MC
+Outpatient Behavioral Health,91278,Applied Behavioral Analysis (A
+Outpatient Behavioral Health,ABA,Applied Behavioral Analysis
+Outpatient Behavioral Health,BHR,Behavioral Health Rehabilitati
+Outpatient Behavioral Health,CAC,Certified Addictions Counselor
+Outpatient Behavioral Health,CMC,Community Mental Health Center
+Outpatient Behavioral Health,MH,Mental Health - Substance Abus
+Outpatient Behavioral Health,SA,Substance Abuse Facility
+Outpatient Infusion/Chemo,2IC,Infusion Center
+Outpatient Infusion/Chemo,91180,Antibiotic Infusion
+Outpatient Infusion/Chemo,91218,Home Infusion Therapy for HIV
+Outpatient Infusion/Chemo,91234,Outpatient Infusion/Chemothera
+Outpatient Infusion/Chemo,HI,Home Infusion
+Outpatient Infusion/Chemo,IC,Infusion Center
+Physiatry Rehabilitative Med,10801,Physical Medicine & Rehabilita
+Physiatry Rehabilitative Med,10802,Rehabilitation Medicine
+Physiatry Rehabilitative Med,10805,Physical Medicine Hospice and
+Physiatry Rehabilitative Med,2PM,Physical Medicine
+Physiatry Rehabilitative Med,2RM,Rehab Medicine
+Physical Therapy,2HR,Hand Rehabilitation
+Physical Therapy,2PT,Physical Therapy
+Physical Therapy,90331,Hand Rehabilitation
+Physical Therapy,91141,Physical Therapy
+Plastic Surgery,2PS,Plastic Surgery
+Plastic Surgery,2PSCF,Craniofacial Surgery
+Plastic Surgery,2PSOC,Oculoplastic Surgery
+Plastic Surgery,30602,Surgery Oro-Facial Plastic
+Plastic Surgery,90308,Facial Plastic and Reconstruct
+Plastic Surgery,90316,Craniofacial Surgery
+Plastic Surgery,90356,Oculoplastic Surgery
+Plastic Surgery,91054,Craniofacial Plastics
+Plastic Surgery,91111,Reconstructive Breast Surgery
+Plastic Surgery,91112,Reconstructive Breast Surgery
+Plastic Surgery,91113,Reconstructive Breast Surgery
+Podiatry,2PO,Podiatry
+Podiatry,91213,Foot and Ankle Surgery
+Podiatry,91214,Foot Surgery
+Podiatry,DP,Podiatrist
+Primary Care,10101,General Practice
+Primary Care,10201,Family Practice
+Primary Care,10202,Geriatric Medicine/Family Prac
+Primary Care,10301,Internal Medicine
+Primary Care,10308,Geriatric Medicine/Internal Me
+Primary Care,10336,Internal Medicine Hospice
+Primary Care,2FP,Family Practice
+Primary Care,2GP,General Practice
+Primary Care,2I,Internal Medicine
+Primary Care,2IM,Internal Medicine
+Primary Care,91151,Sleep Medicine-Family Practice
+Primary Care,91209,Config-Primary Care
+Primary Care,91210,Config-Primary Care Attestatio
+Psychiatry,11001,Psychiatry
+Psychiatry,11005,Psychiatry Geriatric
+Psychiatry,11006,Neurology & Psychiatry
+Psychiatry,11007,Addictionology
+Psychiatry,11011,Addiction Psychiatry
+Psychiatry,11014,Neurology/Psychiatry Hospice
+Psychiatry,11101,Psychomatic Medicine
+Psychiatry,2PY,Psychiatry
+Psychiatry,2PYGR,Geriatric Psychiatry
+Psychiatry,91244,Psychiatry Autism Spectrum
+Psychiatry,91250,Psychiatry Home Based Services
+Psychiatry,91252,Psychiatry Trauma/Crisis
+Pulmonology,10313,Pulmonary Disease
+Pulmonology,10318,Medical Diseases of Chest
+Pulmonology,2PD,Pulmonary Disease
+Pulmonology,91139,Sleep Medicine - Pulmonology
+Rheumatology,10314,Rheumatology
+Rheumatology,2RH,Rheumatology
+Rheumatology,91041,Arthritis Reconstruction
+Skilled Nursing Facility,2SNF,Skilled Nursing Facility
+Skilled Nursing Facility,91287,Assisted Living Center
+Skilled Nursing Facility,91294,Skilled Nursing Facilities
+Skilled Nursing Facility,91301,Nursing Facility Transition Di
+Skilled Nursing Facility,91302,Recuperative Care
+Skilled Nursing Facility,ALC,Assisted Living Center
+Skilled Nursing Facility,LSS,Long-Term Services and Support
+Skilled Nursing Facility,SK,Skilled Nursing Facility
+Speech Therapy,2TT,Speech Therapy
+Speech Therapy,91143,Speech Therapy
+Speech Therapy,91257,Speech/Hearing
+Speech Therapy,91258,Speech/Hearing Therapy
+Speech Therapy,91259,Speech/Language/Hearing Therap
+Speech Therapy,SH,Speech Pathologist
+Speech Therapy,ST,Speech Therapist
+Surgical Services ASC,2FS,Free Standing Surgical Unit
+Surgical Services ASC,91235,Outpatient Surgery
+Surgical Services ASC,AC,Ambulatory Surgicenter
+Surgical Services ASC,FEC,Freestanding Emergency Center
+Urology,2U,Urology
+Urology,2UGY,Uro-gynecology
+Urology,2UMI,Urology (Male Infertility)
+Urology,30808,Surgery Urological
+Urology,31001,Urology
+Urology,90379,Urology (Male Infertility)
+Urology,90398,Uro-Gynecology
+Urology,91126,Urologic Oncology
+Urology,91127,UROLOGICTR
+Vascular Surgery,2IY,Peripheral Vascular Disease
+Vascular Surgery,2VS,Vascular Surgery
+Vascular Surgery,40317,Vascular & Interventional Radi
+Vascular Surgery,40319,Angiography and Interventional
+Vascular Surgery,90071,Peripheral Vascular Disease
