@@ -1470,22 +1470,30 @@ zip_access_complete AS (
 distinct_providers AS (
   -- --------------------------------------------------------
   -- COUNT DISTINCT PROVIDERS PER COUNTY × SPECIALTY × PLAN TYPE
-  -- PER 422.116(e)(1)(i): PROVIDER MUST BE WITHIN THRESHOLD
-  -- OF AT LEAST ONE BENEFICIARY TO COUNT
-  -- THIS FIXES THE DOUBLE COUNT BUG:
-  --   OLD: SUM(provider_count_per_zip) → counts same provider multiple times
-  --   NEW: COUNT(DISTINCT provider_id) → each provider counted once per county
+  -- MUST GO BACK TO SOURCE TABLES — provider_id not stored in fact_zip_access
+  -- APPLIES SAME DISTANCE FILTER AS fact_zip_access_v2
   -- --------------------------------------------------------
   SELECT
-    bene_county_fips                                                 AS county_fips,
-    cms_specialty,
-    plan_type,
-    COUNT(DISTINCT provider_id)                                      AS actual_provider_count
-  FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_fact_zip_access_v2`
+    b.county_fips,
+    p.cms_specialty,
+    p.plan_type,
+    COUNT(DISTINCT p.provider_id)                                    AS actual_provider_count
+  FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_beneficiaries` b
+  JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_zip_reference` bene_zip
+    ON b.zip_code = bene_zip.zip_code
+  JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_providers_multi_specialty_v2` p
+    ON TRUE
+  JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_time_distance` t
+    ON t.cms_specialty = p.cms_specialty
+    AND t.county_type  = b.county_type
+  WHERE ST_DISTANCE(
+          ST_GEOGPOINT(bene_zip.zip_long, bene_zip.zip_lat),
+          ST_GEOGPOINT(p.zip_long,        p.zip_lat)
+        ) / 1609.34 <= t.max_distance_miles
   GROUP BY
-    bene_county_fips,
-    cms_specialty,
-    plan_type
+    b.county_fips,
+    p.cms_specialty,
+    p.plan_type
 ),
 
 county_rollup AS (
