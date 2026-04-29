@@ -12,3 +12,20 @@
     'Allergy/Immunology',
     'Infectious Disease',
     'Oncology, Medical'
+
+
+
+1. Encode CMS rules     → Load 2026 HSD file: required counts, min ratios, 
+                          distance thresholds per specialty × county type
+
+2. Map supply           → Explode Aetna provider network, map 327 specialty 
+                          codes to 43 CMS specialties
+
+3. Measure access       → Straight-line distance: member zip × provider zip,
+                          flag has_access per specialty × plan type
+
+4. Evaluate compliance  → Test 1: % population with access vs 90%/85% threshold
+                          Test 2: distinct providers within threshold vs required count
+
+5. Estimate risk        → Counties × specialties failing either test = gap,
+                          quantified as shortfall in providers or population coverage
