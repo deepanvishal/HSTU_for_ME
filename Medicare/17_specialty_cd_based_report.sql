@@ -1497,8 +1497,7 @@ county_rollup AS (
     ROUND(
       SUM(CASE WHEN has_access THEN total_population ELSE 0 END)
       / NULLIF(SUM(total_population), 0)
-    , 4)                                                             AS pct_covered,
-    SUM(provider_count)                                              AS actual_provider_count
+    , 4)                                                             AS pct_covered
   FROM zip_access_complete
   GROUP BY
     county_fips,
@@ -1506,7 +1505,39 @@ county_rollup AS (
     county_type,
     compliance_threshold,
     cms_specialty,
-    plan_type,
+    plan_type
+),
+
+distinct_providers AS (
+  -- --------------------------------------------------------
+  -- COUNT DISTINCT PROVIDERS PER COUNTY × SPECIALTY × PLAN TYPE
+  -- PER 422.116(e)(1)(i): PROVIDER MUST BE WITHIN THRESHOLD
+  -- OF AT LEAST ONE BENEFICIARY TO COUNT
+  -- FIXES DOUBLE COUNT BUG:
+  --   OLD: SUM(provider_count_per_zip) counts same provider multiple times
+  --   NEW: COUNT(DISTINCT provider_id) — each provider counted once per county
+  -- --------------------------------------------------------
+  SELECT
+    b.county_fips,
+    p.cms_specialty,
+    p.plan_type,
+    COUNT(DISTINCT p.provider_id)                                    AS actual_provider_count
+  FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_beneficiaries` b
+  JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_zip_reference` bene_zip
+    ON b.zip_code = bene_zip.zip_code
+  JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_providers_multi_specialty_v2` p
+    ON TRUE
+  JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_time_distance` t
+    ON t.cms_specialty = p.cms_specialty
+    AND t.county_type  = b.county_type
+  WHERE ST_DISTANCE(
+          ST_GEOGPOINT(bene_zip.zip_long, bene_zip.zip_lat),
+          ST_GEOGPOINT(p.zip_long,        p.zip_lat)
+        ) / 1609.34 <= t.max_distance_miles
+  GROUP BY
+    b.county_fips,
+    p.cms_specialty,
+    p.plan_type
 ),
 
 hospital_beds AS (
