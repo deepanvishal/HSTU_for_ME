@@ -1412,26 +1412,14 @@ GROUP BY
   plan_type,
   max_distance_miles;
 
-
 -- ============================================================
--- STEP 10: fact_gap_analysis
--- WHAT:   Final county-level compliance output.
---         For each county × specialty × plan type:
---         - % beneficiaries with at least 1 provider in range
---         - actual provider count vs CMS required count
---         - compliance status (COMPLIANT / NON-COMPLIANT)
--- WHY:    CMS evaluates compliance at county level.
---         Two tests must both pass per 42 CFR 422.116:
---         Test 1: pct_covered >= 90% (Large Metro/Metro)
---                              >= 85% (Micro/Rural/CEAC)
---         Test 2: actual_provider_count >= required_count
---                 (from CMS 2026 HSD Reference File)
--- NOTE:   all_combinations CTE creates complete grid of
---         county × specialty × plan_type to ensure zips with
---         zero providers are included as NO_ACCESS = FALSE.
---         required_count from ref_hsd_required_counts — exact
---         CMS numbers, no approximation.
---         county_eligibles used for context only.
+-- STEP 10: fact_gap_analysis_v2
+-- PURPOSE: COUNTY LEVEL COMPLIANCE ROLLUP
+--          % BENEFICIARIES WITH ACCESS vs CMS THRESHOLD
+--          ACTUAL vs REQUIRED PROVIDER COUNT
+-- FIX:     actual_provider_count now uses COUNT(DISTINCT provider_id)
+--          per county via distinct_providers CTE
+--          Prevents double counting providers serving multiple zips
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_fact_gap_analysis_v2`
@@ -1440,7 +1428,6 @@ AS
 
 WITH all_combinations AS (
   -- build complete grid: all bene zips × all specialties × all plan types
-  -- ensures zips with no providers are not silently dropped
   SELECT
     b.zip_code,
     b.county_fips,
@@ -1453,7 +1440,7 @@ WITH all_combinations AS (
   FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_beneficiaries` b
   CROSS JOIN (
     SELECT DISTINCT cms_specialty
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_specialty_crosswalk`
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_specialty_crosswalk_expanded`
   ) sc
   CROSS JOIN (
     SELECT DISTINCT plan_type
@@ -1462,8 +1449,7 @@ WITH all_combinations AS (
 ),
 
 zip_access_complete AS (
-  -- left join fact_zip_access to all_combinations
-  -- fills in zeros for zips with no providers within threshold
+  -- left join fact_zip_access to fill zeros for zips with no providers
   SELECT
     a.zip_code,
     a.county_fips,
@@ -1473,7 +1459,6 @@ zip_access_complete AS (
     a.total_population,
     a.cms_specialty,
     a.plan_type,
-    COALESCE(z.provider_count_within_threshold, 0)                  AS provider_count,
     COALESCE(z.has_access, FALSE)                                    AS has_access
   FROM all_combinations a
   LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_fact_zip_access_v2` z
@@ -1482,9 +1467,29 @@ zip_access_complete AS (
     AND a.plan_type     = z.plan_type
 ),
 
+distinct_providers AS (
+  -- --------------------------------------------------------
+  -- COUNT DISTINCT PROVIDERS PER COUNTY × SPECIALTY × PLAN TYPE
+  -- PER 422.116(e)(1)(i): PROVIDER MUST BE WITHIN THRESHOLD
+  -- OF AT LEAST ONE BENEFICIARY TO COUNT
+  -- THIS FIXES THE DOUBLE COUNT BUG:
+  --   OLD: SUM(provider_count_per_zip) → counts same provider multiple times
+  --   NEW: COUNT(DISTINCT provider_id) → each provider counted once per county
+  -- --------------------------------------------------------
+  SELECT
+    bene_county_fips                                                 AS county_fips,
+    cms_specialty,
+    plan_type,
+    COUNT(DISTINCT provider_id)                                      AS actual_provider_count
+  FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_fact_zip_access_v2`
+  GROUP BY
+    bene_county_fips,
+    cms_specialty,
+    plan_type
+),
+
 county_rollup AS (
-  -- roll up zip level to county level
-  -- pct_covered = population with access / total county population
+  -- roll up zip level to county level for test 1
   SELECT
     county_fips,
     county_name,
@@ -1497,8 +1502,7 @@ county_rollup AS (
     ROUND(
       SUM(CASE WHEN has_access THEN total_population ELSE 0 END)
       / NULLIF(SUM(total_population), 0)
-    , 4)                                                             AS pct_covered,
-    SUM(provider_count)                                              AS actual_provider_count
+    , 4)                                                             AS pct_covered
   FROM zip_access_complete
   GROUP BY
     county_fips,
@@ -1506,16 +1510,12 @@ county_rollup AS (
     county_type,
     compliance_threshold,
     cms_specialty,
-    plan_type,
+    plan_type
 ),
 
 hospital_beds AS (
-  -- --------------------------------------------------------
-  -- SUM CONTRACTED BEDS PER COUNTY FOR ACUTE INPATIENT ONLY
-  -- SOURCE: hosp_list_cmi (Pin = provider_id, Beds = bed count)
-  -- CMS requires 12.2 beds per 1,000 beneficiaries
-  -- NULL beds excluded - unknown bed count not credited
-  -- --------------------------------------------------------
+  -- sum contracted beds per county for acute inpatient only
+  -- null beds excluded - unknown bed count not credited
   SELECT
     p.county_fips,
     p.plan_type,
@@ -1542,49 +1542,53 @@ SELECT
   r.pct_covered,
   r.compliance_threshold,
   hsd.required_count                                                 AS required_provider_count,
-  -- beds column: populated only for Acute Inpatient Hospitals, NULL for all others
+  -- beds: populated only for Acute Inpatient Hospitals
   CASE
     WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
       THEN COALESCE(b.total_contracted_beds, 0)
     ELSE NULL
   END                                                                AS total_contracted_beds,
-  -- actual count: beds for hospitals, provider count for everything else
+  -- actual count: beds for hospitals, distinct provider count for all others
   CASE
     WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
       THEN COALESCE(b.total_contracted_beds, 0)
-    ELSE r.actual_provider_count
+    ELSE COALESCE(dp.actual_provider_count, 0)
   END                                                                AS actual_count,
-  -- gap: beds vs required for hospitals, providers vs required for others
+  -- gap: required - actual (negative = surplus)
   CASE
     WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
       THEN hsd.required_count - COALESCE(b.total_contracted_beds, 0)
-    ELSE hsd.required_count - r.actual_provider_count
+    ELSE hsd.required_count - COALESCE(dp.actual_provider_count, 0)
   END                                                                AS provider_gap,
   -- test 1: % beneficiaries with access >= compliance threshold
   CASE
     WHEN r.pct_covered >= r.compliance_threshold THEN TRUE
     ELSE FALSE
   END                                                                AS access_compliant,
-  -- test 2: beds >= required for hospitals, providers >= required for others
+  -- test 2: actual count >= required count per 422.116(e)
   CASE
     WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
       THEN COALESCE(b.total_contracted_beds, 0) >= hsd.required_count
-    ELSE r.actual_provider_count >= hsd.required_count
+    ELSE COALESCE(dp.actual_provider_count, 0)  >= hsd.required_count
   END                                                                AS count_compliant,
-  -- overall: both tests must pass per 42 CFR 422.116
+  -- overall: both tests must pass
   CASE
     WHEN r.pct_covered >= r.compliance_threshold
     AND (
       CASE
         WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
           THEN COALESCE(b.total_contracted_beds, 0) >= hsd.required_count
-        ELSE r.actual_provider_count >= hsd.required_count
+        ELSE COALESCE(dp.actual_provider_count, 0)  >= hsd.required_count
       END
     )                                                                THEN 'COMPLIANT'
     ELSE 'NON-COMPLIANT'
   END                                                                AS compliance_status
 
 FROM county_rollup r
+LEFT JOIN distinct_providers dp
+  ON r.county_fips    = dp.county_fips
+  AND r.cms_specialty = dp.cms_specialty
+  AND r.plan_type     = dp.plan_type
 JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_hsd_required_counts` hsd
   ON hsd.county_name    = r.county_name
   AND hsd.cms_specialty = r.cms_specialty
