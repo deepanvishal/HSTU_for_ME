@@ -653,9 +653,322 @@ def build_tab3(wb, df_summary):
     return ws
 
 
+# ── TAB 4: SUMMARY BY PLAN × COUNTY ──────────────────────────
+
+def build_tab4(wb, df_county):
+    ws = wb.create_sheet("4. Summary by County")
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A5"
+
+    set_col_widths = {
+        "A": 22, "B": 14, "C": 12,
+        "D": 18, "E": 22, "F": 14,
+        "G": 14, "H": 16, "I": 16,
+    }
+    for col, w in set_col_widths.items():
+        ws.column_dimensions[col].width = w
+
+    # title
+    ws.merge_cells("A1:I1")
+    cell(ws, "A1", "Medicare Supply Demand — County Compliance Summary",
+         bold=True, color=WHITE, bg=DARK_BLUE, size=14, h_align="center")
+    ws.row_dimensions[1].height = 35
+
+    # subtitle
+    ws.merge_cells("A2:I2")
+    cell(ws, "A2",
+         "Grain: County × Plan Type  |  Shows how many of the 43 CMS specialties are compliant per county  |  "
+         "Sorted by % Compliant ascending (worst counties first)  |  All 67 Florida counties shown",
+         size=9, color="666666", bg="F9F9F9", italic=True, h_align="left")
+    ws.row_dimensions[2].height = 18
+
+    # callouts
+    callouts = {
+        "A3": "", "B3": "", "C3": "",
+        "D3": "Specialties where BOTH access % AND count standard met",
+        "E3": "Specialties where EITHER access % OR count standard fails",
+        "F3": "Total CMS specialties evaluated (43)",
+        "G3": "compliant_specialties / total_specialties",
+        "H3": "Specialties failing pct_covered >= threshold",
+        "I3": "Specialties failing actual_count >= required_count",
+    }
+    for ref, txt in callouts.items():
+        cell(ws, ref, txt, size=8, color="666666",
+             bg="F9F9F9", italic=True, wrap=True)
+    ws.row_dimensions[3].height = 28
+
+    # headers
+    headers = [
+        ("A4", "County",                    DARK_GREY),
+        ("B4", "County Type",               DARK_GREY),
+        ("C4", "Plan Type",                 DARK_GREY),
+        ("D4", "Compliant\nSpecialties",    "375623"),
+        ("E4", "Non-Compliant\nSpecialties","C00000"),
+        ("F4", "Total\nSpecialties",         DARK_BLUE),
+        ("G4", "% Compliant",               DARK_BLUE),
+        ("H4", "Access\nFailures",           MID_BLUE),
+        ("I4", "Count\nFailures",            MID_BLUE),
+    ]
+    ws.row_dimensions[4].height = 35
+    for ref, label, bg in headers:
+        cell(ws, ref, label, bold=True, color=WHITE,
+             bg=bg, size=10, h_align="center", bdr=True)
+
+    # data rows
+    prev_county = None
+    alt = True
+
+    for i, (_, row) in enumerate(df_county.iterrows()):
+        r = i + 5
+        if row['county_name'] != prev_county:
+            alt = not alt
+            prev_county = row['county_name']
+        row_bg = GREY if alt else WHITE
+        pct = float(row.get('pct_compliant', 0) or 0)
+
+        data = [
+            ("A", row.get('county_name', ''),              DARK_GREY,  row_bg),
+            ("B", row.get('county_type', ''),              DARK_GREY,  row_bg),
+            ("C", row.get('plan_type', ''),                DARK_GREY,  row_bg),
+            ("D", int(row.get('compliant_specialties', 0) or 0),  "375623", "E2EFDA"),
+            ("E", int(row.get('non_compliant_specialties', 0) or 0), "C00000", "FFE0E0"),
+            ("F", int(row.get('total_specialties', 0) or 0),      DARK_BLUE, row_bg),
+            ("G", pct,                                     DARK_BLUE,  row_bg),
+            ("H", int(row.get('access_failures', 0) or 0),        MID_BLUE,  LIGHT_BLUE),
+            ("I", int(row.get('count_failures', 0) or 0),         MID_BLUE,  LIGHT_BLUE),
+        ]
+        for col, val, txt_color, bg_color in data:
+            c = ws[f"{col}{r}"]
+            c.value = val
+            c.font = Font(name="Arial", color=txt_color, size=10, bold=(col == "G"))
+            c.fill = fill(bg_color)
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = thin_border()
+            if col == "G":
+                c.number_format = "0.0%"
+        ws.row_dimensions[r].height = 16
+
+    # gradient on % compliant
+    last_row = len(df_county) + 4
+    ws.conditional_formatting.add(
+        f"G5:G{last_row}",
+        ColorScaleRule(
+            start_type="num", start_value=0,   start_color="C00000",
+            mid_type="num",   mid_value=0.5,   mid_color="FFEB84",
+            end_type="num",   end_value=1,     end_color="375623"
+        )
+    )
+    return ws
+
+
+# ── TAB 5: DATA DICTIONARY ────────────────────────────────────
+
+def build_tab5(wb):
+    ws = wb.create_sheet("5. Data Dictionary")
+    ws.sheet_view.showGridLines = False
+
+    ws.column_dimensions["A"].width = 3
+    ws.column_dimensions["B"].width = 28
+    ws.column_dimensions["C"].width = 24
+    ws.column_dimensions["D"].width = 50
+    ws.column_dimensions["E"].width = 40
+    ws.column_dimensions["F"].width = 20
+
+    # title
+    ws.merge_cells("B1:F1")
+    cell(ws, "B1", "Medicare Supply Demand — Data Dictionary",
+         bold=True, color=WHITE, bg=DARK_BLUE, size=14, h_align="center")
+    ws.row_dimensions[1].height = 35
+
+    # headers
+    for ref, label, bg in [
+        ("B2", "Column Name",    MID_BLUE),
+        ("C2", "Source Table",   MID_BLUE),
+        ("D2", "Description",    MID_BLUE),
+        ("E2", "Formula / Logic",MID_BLUE),
+        ("F2", "Data Type",      MID_BLUE),
+    ]:
+        cell(ws, ref, label, bold=True, color=WHITE,
+             bg=bg, size=10, h_align="center", bdr=True)
+    ws.row_dimensions[2].height = 20
+
+    entries = [
+        # col name, source, description, formula, type
+        ("County",                   "ref_county_classification",  "Florida county name",                                                          "From Census geo_us_boundaries.counties",                   "STRING"),
+        ("County Type",              "ref_county_classification",  "CMS county classification per 422.116(c)",                                     "Large Metro / Metro / Micro / Rural / CEAC",               "STRING"),
+        ("CMS Specialty",            "ref_specialty_crosswalk_expanded", "One of 43 CMS-defined provider or facility specialty types",              "Per 42 CFR 422.116(b)",                                    "STRING"),
+        ("Plan Type",                "stg_providers_multi_specialty","MA plan product type",                                                        "MA-HMO or MA-PPO",                                         "STRING"),
+        ("Total Medicare Beneficiaries","ref_hsd_required_counts", "Total Medicare eligible people in the county",                                 "From CMS MA State/County Penetration data",                "INT64"),
+        ("Beneficiaries Required to Cover","ref_hsd_required_counts","CMS benchmark enrollment for a large MA plan",                               "95th_percentile_ratio × total_medicare_beneficiaries",     "INT64"),
+        ("95th Pct Base Ratio",      "ref_hsd_required_counts",    "Proportion of Medicare benes enrolled in 95th percentile MA plan",             "CMS calculated annually per county type. Published in HSD file.", "FLOAT64"),
+        ("CMS Required Count",       "ref_hsd_required_counts",    "Minimum number of providers or beds CMS requires",                             "CEIL(min_ratio × beneficiaries_required_to_cover / 1,000). Flat 1 for most facility types.", "INT64"),
+        ("Access Threshold",         "ref_county_classification",  "Minimum % of members that must have access per 422.116(d)(4)",                 "0.90 for Large Metro/Metro. 0.85 for Micro/Rural/CEAC",    "FLOAT64"),
+        ("Max Distance (Miles)",     "ref_time_distance",          "CMS maximum allowed distance per specialty per county type",                    "From 422.116 Table 1. Applied at MEMBER county type.",     "FLOAT64"),
+        ("County Population (ACS 2018)","stg_beneficiaries",       "Total residential population in the county",                                   "ACS 2018 5-year zip estimates rolled up to county",        "INT64"),
+        ("Population With Access",   "fact_zip_access",            "Population in member zips that have at least 1 provider within threshold",     "SUM(zip_population WHERE has_access = TRUE)",              "INT64"),
+        ("% Members With Access",    "fact_gap_analysis",          "Share of county population with at least 1 provider within CMS threshold",     "population_with_access / total_county_population",         "FLOAT64"),
+        ("Contracted Providers / Beds","fact_gap_analysis",        "Distinct contracted providers within threshold for this county and specialty",  "COUNT(DISTINCT provider_id) where distance <= max_distance_miles and within at least 1 member zip", "INT64"),
+        ("Contracted Beds (Inpatient Only)","hosp_list_cmi",       "Sum of contracted inpatient beds for Acute Inpatient Hospitals only",          "SUM(Beds) from hosp_list_cmi. NULL beds excluded. 0 for all other specialties.", "INT64"),
+        ("Gap (Required - Actual)",  "fact_gap_analysis",          "Difference between CMS required count and actual contracted count",             "required_provider_count − actual_count. Negative = surplus.", "INT64"),
+        ("Access Standard Met",      "fact_gap_analysis",          "Whether county passes CMS Test 1 — access percentage standard",                "pct_covered >= compliance_threshold",                      "BOOLEAN"),
+        ("Count Standard Met",       "fact_gap_analysis",          "Whether county passes CMS Test 2 — minimum provider count standard",           "actual_count >= required_provider_count",                  "BOOLEAN"),
+        ("Compliance Status",        "fact_gap_analysis",          "Overall compliance result. BOTH tests must pass per 422.116",                  "COMPLIANT if access_compliant AND count_compliant. Otherwise NON-COMPLIANT.", "STRING"),
+    ]
+
+    for i, (col_nm, source, desc, formula, dtype) in enumerate(entries):
+        r = i + 3
+        bg = GREY if i % 2 == 0 else WHITE
+        for ref, val, w in [
+            (f"B{r}", col_nm,  True),
+            (f"C{r}", source,  False),
+            (f"D{r}", desc,    False),
+            (f"E{r}", formula, False),
+            (f"F{r}", dtype,   False),
+        ]:
+            cell(ws, ref, val, bold=w, size=9, bg=bg, bdr=True, wrap=True)
+        ws.row_dimensions[r].height = 30
+
+    return ws
+
+
+# ── TAB 6: CMS RULES ─────────────────────────────────────────
+
+def build_tab6(wb):
+    ws = wb.create_sheet("6. CMS Rules")
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A4"
+
+    for col, w in {"A": 32, "B": 16, "C": 16, "D": 16, "E": 16, "F": 16}.items():
+        ws.column_dimensions[col].width = w
+
+    ws.merge_cells("A1:F1")
+    cell(ws, "A1", "42 CFR 422.116 — Network Adequacy Time & Distance Standards",
+         bold=True, color=WHITE, bg=DARK_BLUE, size=13, h_align="center")
+    ws.row_dimensions[1].height = 35
+
+    ws.merge_cells("A2:F2")
+    cell(ws, "A2",
+         "Source: https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-422/subpart-C/section-422.116  |  "
+         "CMS 2026 HSD Reference File: https://www.cms.gov/medicare/health-drug-plans/medicare-advantage-application",
+         size=8, color="666666", bg="F9F9F9", italic=True, h_align="left")
+    ws.row_dimensions[2].height = 18
+
+    # headers
+    for i, h in enumerate(["CMS Specialty", "Large Metro", "Metro", "Micro", "Rural", "CEAC"]):
+        c = ws.cell(row=3, column=i+1)
+        cell(ws, c.coordinate, h, bold=True, color=WHITE,
+             bg=MID_BLUE, size=10, h_align="center", bdr=True)
+    ws.row_dimensions[3].height = 20
+
+    provider_td = [
+        ("Primary Care",               "10 min / 5 mi",   "15 min / 10 mi",  "30 min / 20 mi",  "40 min / 30 mi",  "70 min / 60 mi"),
+        ("Allergy and Immunology",     "30 min / 15 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "90 min / 75 mi",  "125 min / 110 mi"),
+        ("Cardiology",                 "20 min / 10 mi",  "30 min / 20 mi",  "50 min / 35 mi",  "75 min / 60 mi",  "95 min / 85 mi"),
+        ("Chiropractor",               "30 min / 15 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "90 min / 75 mi",  "125 min / 110 mi"),
+        ("Clinical Psychology",        "20 min / 10 mi",  "45 min / 30 mi",  "60 min / 45 mi",  "75 min / 60 mi",  "145 min / 130 mi"),
+        ("Clinical Social Work",       "20 min / 10 mi",  "30 min / 20 mi",  "50 min / 35 mi",  "75 min / 60 mi",  "125 min / 110 mi"),
+        ("Dermatology",                "20 min / 10 mi",  "45 min / 30 mi",  "60 min / 45 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Endocrinology",              "30 min / 15 mi",  "60 min / 40 mi",  "100 min / 75 mi", "110 min / 90 mi", "145 min / 130 mi"),
+        ("ENT/Otolaryngology",         "30 min / 15 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "90 min / 75 mi",  "125 min / 110 mi"),
+        ("Gastroenterology",           "20 min / 10 mi",  "45 min / 30 mi",  "60 min / 45 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("General Surgery",            "20 min / 10 mi",  "30 min / 20 mi",  "50 min / 35 mi",  "75 min / 60 mi",  "95 min / 85 mi"),
+        ("Gynecology OB/GYN",          "30 min / 15 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "90 min / 75 mi",  "125 min / 110 mi"),
+        ("Infectious Diseases",        "30 min / 15 mi",  "60 min / 40 mi",  "100 min / 75 mi", "110 min / 90 mi", "145 min / 130 mi"),
+        ("Nephrology",                 "30 min / 15 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "90 min / 75 mi",  "125 min / 110 mi"),
+        ("Neurology",                  "20 min / 10 mi",  "45 min / 30 mi",  "60 min / 45 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Neurosurgery",               "30 min / 15 mi",  "60 min / 40 mi",  "100 min / 75 mi", "110 min / 90 mi", "145 min / 130 mi"),
+        ("Oncology Medical/Surgical",  "20 min / 10 mi",  "45 min / 30 mi",  "60 min / 45 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Oncology Radiation",         "30 min / 15 mi",  "60 min / 40 mi",  "100 min / 75 mi", "110 min / 90 mi", "145 min / 130 mi"),
+        ("Ophthalmology",              "20 min / 10 mi",  "30 min / 20 mi",  "50 min / 35 mi",  "75 min / 60 mi",  "95 min / 85 mi"),
+        ("Orthopedic Surgery",         "20 min / 10 mi",  "30 min / 20 mi",  "50 min / 35 mi",  "75 min / 60 mi",  "95 min / 85 mi"),
+        ("Physiatry Rehab Med",        "30 min / 15 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "90 min / 75 mi",  "125 min / 110 mi"),
+        ("Plastic Surgery",            "30 min / 15 mi",  "60 min / 40 mi",  "100 min / 75 mi", "110 min / 90 mi", "145 min / 130 mi"),
+        ("Podiatry",                   "20 min / 10 mi",  "45 min / 30 mi",  "60 min / 45 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Psychiatry",                 "20 min / 10 mi",  "45 min / 30 mi",  "60 min / 45 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Pulmonology",                "20 min / 10 mi",  "45 min / 30 mi",  "60 min / 45 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Rheumatology",               "30 min / 15 mi",  "60 min / 40 mi",  "100 min / 75 mi", "110 min / 90 mi", "145 min / 130 mi"),
+        ("Urology",                    "20 min / 10 mi",  "45 min / 30 mi",  "60 min / 45 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Vascular Surgery",           "30 min / 15 mi",  "60 min / 40 mi",  "100 min / 75 mi", "110 min / 90 mi", "145 min / 130 mi"),
+        ("Cardiothoracic Surgery",     "30 min / 15 mi",  "60 min / 40 mi",  "100 min / 75 mi", "110 min / 90 mi", "145 min / 130 mi"),
+    ]
+
+    facility_td = [
+        ("Acute Inpatient Hospitals",  "20 min / 10 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Cardiac Surgery Program",    "30 min / 15 mi",  "60 min / 40 mi",  "160 min / 120 mi","145 min / 120 mi","155 min / 140 mi"),
+        ("Cardiac Catheterization",    "30 min / 15 mi",  "60 min / 40 mi",  "160 min / 120 mi","145 min / 120 mi","155 min / 140 mi"),
+        ("Critical Care ICU",          "20 min / 10 mi",  "45 min / 30 mi",  "160 min / 120 mi","145 min / 120 mi","155 min / 140 mi"),
+        ("Surgical Services ASC",      "20 min / 10 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Skilled Nursing Facility",   "20 min / 10 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "75 min / 60 mi",  "95 min / 85 mi"),
+        ("Diagnostic Radiology",       "20 min / 10 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Mammography",                "20 min / 10 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Physical Therapy",           "20 min / 10 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Occupational Therapy",       "20 min / 10 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Speech Therapy",             "20 min / 10 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Inpatient Psychiatric",      "30 min / 15 mi",  "70 min / 45 mi",  "100 min / 75 mi", "90 min / 75 mi",  "155 min / 140 mi"),
+        ("Outpatient Infusion/Chemo",  "20 min / 10 mi",  "45 min / 30 mi",  "80 min / 60 mi",  "75 min / 60 mi",  "110 min / 100 mi"),
+        ("Outpatient Behavioral Health","20 min / 10 mi", "40 min / 25 mi",  "55 min / 40 mi",  "60 min / 50 mi",  "110 min / 100 mi"),
+    ]
+
+    r = 4
+    for i, row_data in enumerate(provider_td):
+        bg = LIGHT_BLUE if i % 2 == 0 else WHITE
+        for j, val in enumerate(row_data):
+            cell(ws, ws.cell(row=r, column=j+1).coordinate,
+                 val, size=9, bg=bg, h_align="center", bdr=True)
+        ws.row_dimensions[r].height = 16
+        r += 1
+
+    # facility separator
+    ws.merge_cells(f"A{r}:F{r}")
+    cell(ws, f"A{r}",
+         "  FACILITY SPECIALTY TYPES  |  Minimum = 1 per county (flat) per 422.116(e)(2)(iii)  |  "
+         "EXCEPTION: Acute Inpatient Hospitals = CEIL(12.2 × beneficiaries_required / 1,000) BEDS",
+         bold=True, color=WHITE, bg="375623", size=9, h_align="left")
+    ws.row_dimensions[r].height = 20
+    r += 1
+
+    for i, row_data in enumerate(facility_td):
+        bg = "E2EFDA" if i % 2 == 0 else WHITE
+        for j, val in enumerate(row_data):
+            cell(ws, ws.cell(row=r, column=j+1).coordinate,
+                 val, size=9, bg=bg, h_align="center", bdr=True)
+        ws.row_dimensions[r].height = 16
+        r += 1
+
+    r += 1
+    ws.merge_cells(f"A{r}:F{r}")
+    cell(ws, f"A{r}",
+         "COMPLIANCE THRESHOLDS per 422.116(d)(4):  "
+         "Large Metro + Metro → 90% of beneficiaries must have access  |  "
+         "Micro + Rural + CEAC → 85%  |  "
+         "BOTH access % AND provider count tests must pass for COMPLIANT status",
+         bold=True, color=DARK_BLUE, bg=LIGHT_BLUE, size=10, h_align="left", wrap=True)
+    ws.row_dimensions[r].height = 30
+
+    return ws
+
+
 # ── MAIN ─────────────────────────────────────────────────────
 import pandas as pd
 from google.cloud import bigquery
+
+SUMMARY_COUNTY_QUERY = f"""
+SELECT
+  county_name,
+  county_type,
+  plan_type,
+  COUNTIF(compliance_status = 'COMPLIANT')     AS compliant_specialties,
+  COUNTIF(compliance_status = 'NON-COMPLIANT') AS non_compliant_specialties,
+  COUNT(*)                                      AS total_specialties,
+  ROUND(
+    COUNTIF(compliance_status = 'COMPLIANT') / COUNT(*), 4
+  )                                             AS pct_compliant,
+  COUNTIF(access_compliant = FALSE)             AS access_failures,
+  COUNTIF(count_compliant = FALSE)              AS count_failures
+FROM `{PROJECT}.{DATASET}.{PREFIX}_fact_gap_analysis_v2`
+GROUP BY county_name, county_type, plan_type
+ORDER BY pct_compliant ASC, county_name, plan_type
+"""
 
 if __name__ == "__main__":
     client = bigquery.Client(project=CLIENT_PROJECT)
@@ -667,6 +980,10 @@ if __name__ == "__main__":
     print("Querying specialty summary...")
     df_summary = client.query(SUMMARY_SPECIALTY_QUERY).to_dataframe()
     print(f"  {len(df_summary):,} rows")
+
+    print("Querying county summary...")
+    df_county = client.query(SUMMARY_COUNTY_QUERY).to_dataframe()
+    print(f"  {len(df_county):,} rows")
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -680,6 +997,15 @@ if __name__ == "__main__":
     print("Building Tab 3...")
     build_tab3(wb, df_summary)
 
-    output = "medicare_supply_demand_v2.xlsx"
+    print("Building Tab 4...")
+    build_tab4(wb, df_county)
+
+    print("Building Tab 5...")
+    build_tab5(wb)
+
+    print("Building Tab 6...")
+    build_tab6(wb)
+
+    output = "medicare_supply_demand.xlsx"
     wb.save(output)
     print(f"Saved: {output}")
