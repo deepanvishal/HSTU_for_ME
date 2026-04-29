@@ -310,40 +310,29 @@ def build_tab2(wb, df):
 
     # col widths
     col_widths = {
-        "A": 20,  # county
-        "B": 14,  # county type
-        "C": 28,  # cms specialty
-        "D": 10,  # plan type
-        "E": 16,  # total bene
-        "F": 22,  # bene required
-        "G": 14,  # 95th ratio
-        "H": 16,  # required count
-        "I": 14,  # threshold
-        "J": 18,  # county population
-        "K": 20,  # pop with access
-        "L": 16,  # pct covered
-        "M": 18,  # actual count
-        "N": 16,  # contracted beds
-        "O": 14,  # gap
-        "P": 14,  # access compliant
-        "Q": 14,  # count compliant
-        "R": 16,  # compliance status
+        "A": 20, "B": 14, "C": 28, "D": 10,
+        "E": 16, "F": 14, "G": 22, "H": 12,
+        "I": 16, "J": 14, "K": 16,
+        "L": 18, "M": 20, "N": 18,
+        "O": 18, "P": 16,
+        "Q": 14, "R": 14, "S": 14, "T": 16,
     }
     for col, w in col_widths.items():
         ws.column_dimensions[col].width = w
 
     # ── ROW 1: TITLE ─────────────────────────────────────────
-    ws.merge_cells("A1:R1")
-    cell(ws, "A1", "Medicare Supply Demand — Compliance Report (V2)",
+    ws.merge_cells("A1:T1")
+    cell(ws, "A1", "Medicare Supply Demand — Compliance Report",
          bold=True, color=WHITE, bg=DARK_BLUE, size=14, h_align="center")
     ws.row_dimensions[1].height = 35
 
     # ── ROW 2: COLOR BAND LABELS ──────────────────────────────
     for rng, text, bg in [
-        ("A2:D2",  "  IDENTIFIERS",                              DARK_GREY),
-        ("E2:I2",  "  CMS RULES  (42 CFR 422.116 + HSD File)",   MID_BLUE),
-        ("J2:N2",  "  AETNA NETWORK DATA",                       "C55A11"),
-        ("O2:R2",  "  COMPLIANCE RESULTS",                       DARK_BLUE),
+        ("A2:D2",  "  IDENTIFIERS",                                      DARK_GREY),
+        ("E2:K2",  "  CMS RULES  (42 CFR 422.116 + HSD Reference File)", MID_BLUE),
+        ("L2:N2",  "  POPULATION DATA  (Census ACS 2018)",               "C55A11"),
+        ("O2:P2",  "  AETNA NETWORK ACCESS",                             "C55A11"),
+        ("Q2:T2",  "  COMPLIANCE RESULTS",                               DARK_BLUE),
     ]:
         ws.merge_cells(rng)
         cell(ws, rng.split(":")[0], text,
@@ -352,24 +341,23 @@ def build_tab2(wb, df):
 
     # ── ROW 3: CALLOUTS ───────────────────────────────────────
     callouts = {
-        "A3": "",
-        "B3": "",
-        "C3": "",
-        "D3": "",
-        "E3": "Source: CMS 2026 HSD Reference File",
-        "F3": "95th pct ratio × total Medicare beneficiaries",
-        "G3": "CMS published 95th percentile base ratio",
-        "H3": "From HSD file directly — not estimated",
-        "I3": "90% Large Metro/Metro | 85% Micro/Rural/CEAC",
-        "J3": "ACS 2018 zip population rolled to county",
-        "K3": "SUM(zip_population WHERE has_access = TRUE)",
-        "L3": "population_with_access / total_county_population",
-        "M3": "COUNT(DISTINCT provider_id) within max_distance_miles",
-        "N3": "SUM(Beds) from hosp_list_cmi — Acute Inpatient only",
-        "O3": "required_provider_count − actual_count",
-        "P3": "pct_covered >= compliance_threshold",
-        "Q3": "actual_count >= required_provider_count",
-        "R3": "BOTH access AND count standards met",
+        "A3": "", "B3": "", "C3": "", "D3": "",
+        "E3": "Source: CMS MA State/County Penetration file",
+        "F3": "CMS published annually per county type. Same for all specialties.",
+        "G3": "95th_pct_ratio × total_medicare_beneficiaries",
+        "H3": "From 422.116 Table 2. Varies by specialty and county type.",
+        "I3": "CEIL(min_ratio × beneficiaries_required / 1,000). From HSD file.",
+        "J3": "90% Large Metro/Metro | 85% Micro/Rural/CEAC",
+        "K3": "From 422.116 Table 1. Applied at member county type.",
+        "L3": "ACS 2018 zip population rolled to county. All ages, all insurance.",
+        "M3": "SUM(zip_population WHERE has_access = TRUE per zip)",
+        "N3": "population_with_access / total_county_population",
+        "O3": "COUNT(DISTINCT provider_id) within max_distance_miles of at least 1 member zip",
+        "P3": "SUM(Beds) from hosp_list_cmi. Acute Inpatient only. 0 for all others.",
+        "Q3": "required_provider_count − actual_count. Negative = surplus.",
+        "R3": "pct_covered >= compliance_threshold",
+        "S3": "actual_count >= required_provider_count",
+        "T3": "BOTH access AND count standards met",
     }
     for ref, txt in callouts.items():
         cell(ws, ref, txt, size=8, color="666666", bg="F9F9F9",
@@ -378,24 +366,26 @@ def build_tab2(wb, df):
 
     # ── ROW 4: COLUMN HEADERS ────────────────────────────────
     headers = [
-        ("A4", "County",                        DARK_GREY),
-        ("B4", "County Type",                   DARK_GREY),
-        ("C4", "CMS Specialty",                 DARK_GREY),
-        ("D4", "Plan Type",                     DARK_GREY),
-        ("E4", "Total Medicare\nBeneficiaries",  MID_BLUE),
-        ("F4", "Beneficiaries\nRequired to Cover", MID_BLUE),
-        ("G4", "95th Pct\nBase Ratio",           MID_BLUE),
-        ("H4", "CMS Required\nCount",            MID_BLUE),
-        ("I4", "Access\nThreshold",              MID_BLUE),
-        ("J4", "County Population\n(ACS 2018)",  "C55A11"),
-        ("K4", "Population\nWith Access",        "C55A11"),
-        ("L4", "% Members\nWith Access",         "C55A11"),
-        ("M4", "Contracted\nProviders / Beds",   "C55A11"),
-        ("N4", "Contracted Beds\n(Inpatient Only)", "C55A11"),
-        ("O4", "Gap\n(Required - Actual)",       DARK_BLUE),
-        ("P4", "Access\nStandard Met",           DARK_BLUE),
-        ("Q4", "Count\nStandard Met",            DARK_BLUE),
-        ("R4", "Compliance\nStatus",             DARK_BLUE),
+        ("A4", "County",                            DARK_GREY),
+        ("B4", "County Type",                       DARK_GREY),
+        ("C4", "CMS Specialty",                     DARK_GREY),
+        ("D4", "Plan Type",                         DARK_GREY),
+        ("E4", "Total Medicare\nBeneficiaries",      MID_BLUE),
+        ("F4", "95th Pct\nBase Ratio",               MID_BLUE),
+        ("G4", "Beneficiaries\nRequired to Cover",   MID_BLUE),
+        ("H4", "Min\nRatio",                         MID_BLUE),
+        ("I4", "CMS Required\nCount",                MID_BLUE),
+        ("J4", "Access\nThreshold",                  MID_BLUE),
+        ("K4", "Max Distance\n(Miles)",              MID_BLUE),
+        ("L4", "County Population\n(ACS 2018)",      "C55A11"),
+        ("M4", "Population\nWith Access",            "C55A11"),
+        ("N4", "% Population\nWith Access",          "C55A11"),
+        ("O4", "Contracted\nProviders / Beds",       "C55A11"),
+        ("P4", "Contracted Beds\n(Inpatient Only)",  "C55A11"),
+        ("Q4", "Gap\n(Required - Actual)",           DARK_BLUE),
+        ("R4", "Access\nStandard Met",               DARK_BLUE),
+        ("S4", "Count\nStandard Met",                DARK_BLUE),
+        ("T4", "Compliance\nStatus",                 DARK_BLUE),
     ]
     ws.row_dimensions[4].height = 35
     for ref, label, bg in headers:
@@ -419,36 +409,33 @@ def build_tab2(wb, df):
                 return 0
             return val
 
-        # bool → Yes/No
         access_c = "Yes" if bool(v("access_compliant")) else "No"
         count_c  = "Yes" if bool(v("count_compliant"))  else "No"
-
-        # beds: 0 for non-hospital
-        beds = v("total_contracted_beds")
-        if beds is None or beds == 0:
-            beds = 0
+        beds = v("total_contracted_beds") or 0
 
         data = [
-            ("A", v("county_name"),                      DARK_GREY,  row_bg),
-            ("B", v("county_type"),                      DARK_GREY,  row_bg),
-            ("C", v("cms_specialty"),                    DARK_GREY,  row_bg),
-            ("D", v("plan_type"),                        DARK_GREY,  row_bg),
-            ("E", v("county_total_beneficiaries"),       MID_BLUE,   LIGHT_BLUE_D),
-            ("F", v("beneficiaries_required_to_cover"),  MID_BLUE,   LIGHT_BLUE_D),
-            ("G", v("ratio_95th_percentile"),            MID_BLUE,   LIGHT_BLUE_D),
-            ("H", v("required_provider_count"),          MID_BLUE,   LIGHT_BLUE_D),
-            ("I", v("compliance_threshold"),             MID_BLUE,   LIGHT_BLUE_D),
-            ("J", v("total_county_population"),          "C55A11",   LIGHT_ORANGE),
-            ("K", v("population_with_access"),           "C55A11",   LIGHT_ORANGE),
-            ("L", v("pct_covered"),                      "C55A11",   LIGHT_ORANGE),
-            ("M", v("actual_count"),                     "C55A11",   LIGHT_ORANGE),
-            ("N", beds,                                  "C55A11",   LIGHT_ORANGE),
-            ("O", v("provider_gap"),                     DARK_BLUE,  row_bg),
-            ("P", access_c,  DARK_BLUE,
+            ("A", v("county_name"),                        DARK_GREY,  row_bg),
+            ("B", v("county_type"),                        DARK_GREY,  row_bg),
+            ("C", v("cms_specialty"),                      DARK_GREY,  row_bg),
+            ("D", v("plan_type"),                          DARK_GREY,  row_bg),
+            ("E", v("county_total_beneficiaries"),         MID_BLUE,   LIGHT_BLUE_D),
+            ("F", v("ratio_95th_percentile"),              MID_BLUE,   LIGHT_BLUE_D),
+            ("G", v("beneficiaries_required_to_cover"),    MID_BLUE,   LIGHT_BLUE_D),
+            ("H", v("min_ratio_per_1000"),                 MID_BLUE,   LIGHT_BLUE_D),
+            ("I", v("required_provider_count"),            MID_BLUE,   LIGHT_BLUE_D),
+            ("J", v("compliance_threshold"),               MID_BLUE,   LIGHT_BLUE_D),
+            ("K", v("max_distance_miles"),                 MID_BLUE,   LIGHT_BLUE_D),
+            ("L", v("total_county_population"),            "C55A11",   LIGHT_ORANGE),
+            ("M", v("population_with_access"),             "C55A11",   LIGHT_ORANGE),
+            ("N", v("pct_covered"),                        "C55A11",   LIGHT_ORANGE),
+            ("O", v("actual_count"),                       "C55A11",   LIGHT_ORANGE),
+            ("P", beds,                                    "C55A11",   LIGHT_ORANGE),
+            ("Q", v("provider_gap"),                       DARK_BLUE,  row_bg),
+            ("R", access_c, DARK_BLUE,
              LIGHT_GREEN if access_c == "Yes" else LIGHT_RED),
-            ("Q", count_c,   DARK_BLUE,
+            ("S", count_c,  DARK_BLUE,
              LIGHT_GREEN if count_c  == "Yes" else LIGHT_RED),
-            ("R", v("compliance_status"), DARK_BLUE,
+            ("T", v("compliance_status"), DARK_BLUE,
              LIGHT_GREEN if is_compliant else LIGHT_RED),
         ]
 
@@ -456,26 +443,27 @@ def build_tab2(wb, df):
             c = ws[f"{col}{r}"]
             c.value = val
             c.font = Font(name="Arial", color=txt_color, size=9,
-                          bold=(col == "R"))
+                          bold=(col == "T"))
             c.fill = fill(bg_color)
             c.alignment = Alignment(horizontal="center", vertical="center",
                                     wrap_text=False)
             c.border = thin_border()
-            if col == "L":
+            if col == "N":
                 c.number_format = "0.0%"
-            elif col == "G":
+            elif col in ("F", "H"):
                 c.number_format = "0.0000"
-            elif col == "I":
+            elif col == "J":
                 c.number_format = "0%"
 
         ws.row_dimensions[r].height = 15
 
     # note
     note_r = len(df) + 5 + 1
-    ws.merge_cells(f"A{note_r}:R{note_r}")
+    ws.merge_cells(f"A{note_r}:T{note_r}")
     cell(ws, f"A{note_r}",
-         "NOTE: Contracted Beds (col N) populated only for Acute Inpatient Hospitals — 0 for all other specialties. "
+         "NOTE: Contracted Beds (col P) populated only for Acute Inpatient Hospitals — 0 for all other specialties. "
          "Gap is negative when actual count exceeds required (surplus). "
+         "% Population With Access uses Census ACS zip population — not Medicare beneficiaries. "
          "Compliance Status = COMPLIANT only when BOTH Access Standard AND Count Standard are met.",
          size=8, color="666666", bg="F9F9F9", italic=True, wrap=True)
     ws.row_dimensions[note_r].height = 30
@@ -499,10 +487,12 @@ SELECT
   cms_specialty,
   plan_type,
   COALESCE(county_total_beneficiaries, 0)       AS county_total_beneficiaries,
-  COALESCE(beneficiaries_required_to_cover, 0)  AS beneficiaries_required_to_cover,
   COALESCE(ratio_95th_percentile, 0)            AS ratio_95th_percentile,
+  COALESCE(beneficiaries_required_to_cover, 0)  AS beneficiaries_required_to_cover,
+  COALESCE(min_ratio_per_1000, 0)               AS min_ratio_per_1000,
   COALESCE(required_provider_count, 0)          AS required_provider_count,
   COALESCE(compliance_threshold, 0)             AS compliance_threshold,
+  COALESCE(max_distance_miles, 0)               AS max_distance_miles,
   COALESCE(total_county_population, 0)          AS total_county_population,
   COALESCE(population_with_access, 0)           AS population_with_access,
   COALESCE(pct_covered, 0)                      AS pct_covered,
