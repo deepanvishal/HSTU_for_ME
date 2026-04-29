@@ -1,20 +1,38 @@
 -- ============================================================
 -- MEDICARE NETWORK ADEQUACY & CAPACITY MODELING
--- ALL REFERENCE + STAGING TABLES
+-- MASTER SQL FILE - ALL STEPS IN EXECUTION ORDER
+--
 -- PROJECT:  anbc-hcb-dev
 -- DATASET:  provider_ds_netconf_data_hcb_dev
 -- PREFIX:   A870800_medicare_supply_demand_
 -- AUTHOR:   deepan_thulasi_aetna_com
--- DATE:     2026-04-21
--- SCOPE:    FLORIDA COUNTIES ONLY
+-- SOURCE:   42 CFR 422.116, CMS 2026 HSD Reference File
+-- SCOPE:    Florida only
+--
+-- EXECUTION ORDER:
+--   STEP 1:  ref_specialty_crosswalk
+--   STEP 2:  ref_time_distance
+--   STEP 3:  ref_county_classification
+--   STEP 4:  ref_zip_reference
+--   STEP 5:  ref_county_name_crosswalk
+--   STEP 6:  ref_hsd_required_counts
+--   STEP 7:  stg_beneficiaries
+--   STEP 8:  stg_providers_multi_specialty
+--   STEP 9:  fact_zip_access
+--   STEP 10: fact_gap_analysis
 -- ============================================================
 
 
 -- ============================================================
--- TABLE 1: ref_specialty_crosswalk
--- PURPOSE: MAP CMS 422.116 SPECIALTIES TO AETNA SPECIALTY CODES
--- FLAGS:   match_type = exact/proxy
---          inflated   = TRUE if aetna_cd maps to multiple cms specialties
+-- STEP 1: ref_specialty_crosswalk
+-- WHAT:   Maps CMS 422.116 specialty names to Aetna internal
+--         specialty codes. One CMS specialty can map to multiple
+--         Aetna codes and vice versa.
+-- WHY:    Aetna and CMS use different specialty coding systems.
+--         This crosswalk is the bridge for all downstream joins.
+-- FLAGS:  match_type = 'exact' (direct match) or 'proxy' (best available)
+--         inflated = TRUE means one Aetna code maps to multiple CMS
+--         specialties — provider counts will be inflated for these
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_specialty_crosswalk`
@@ -69,10 +87,12 @@ SELECT * FROM UNNEST([
 
 
 -- ============================================================
--- TABLE 2: ref_time_distance
--- PURPOSE: MAX TIME + DISTANCE THRESHOLDS PER 42 CFR 422.116
--- SOURCE:  42 CFR 422.116 TABLE 1
--- GRAIN:   cms_specialty x county_type
+-- STEP 2: ref_time_distance
+-- WHAT:   Maximum time and distance thresholds per specialty
+--         per county type. Directly from 42 CFR 422.116 Table 1.
+-- WHY:    Used in fact_zip_access to filter provider-beneficiary
+--         pairs. Only pairs within this threshold survive.
+-- NOTE:   Threshold uses BENEFICIARY county type, not provider.
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_time_distance`
@@ -341,274 +361,16 @@ SELECT * FROM UNNEST([
 
 
 -- ============================================================
--- TABLE 3: ref_min_ratio
--- PURPOSE: MINIMUM PROVIDER RATIO PER 1,000 BENEFICIARIES
--- SOURCE:  42 CFR 422.116 TABLE 2
--- GRAIN:   cms_specialty x county_type
--- NOTE:    ACUTE HOSPITAL = beds per 1,000 not providers
--- NOTE:    ALL OTHER FACILITY TYPES = minimum 1 per county
--- ============================================================
-
-CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_min_ratio`
-OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
-AS
-SELECT * FROM UNNEST([
-  -- Primary Care
-  STRUCT('Primary Care' AS cms_specialty, 'Large Metro' AS county_type, 1.67 AS min_ratio_per_1000),
-  STRUCT('Primary Care', 'Metro',  1.67),
-  STRUCT('Primary Care', 'Micro',  1.42),
-  STRUCT('Primary Care', 'Rural',  1.42),
-  STRUCT('Primary Care', 'CEAC',   1.42),
-  -- Allergy and Immunology
-  STRUCT('Allergy and Immunology', 'Large Metro', 0.05),
-  STRUCT('Allergy and Immunology', 'Metro',       0.05),
-  STRUCT('Allergy and Immunology', 'Micro',       0.04),
-  STRUCT('Allergy and Immunology', 'Rural',       0.04),
-  STRUCT('Allergy and Immunology', 'CEAC',        0.04),
-  -- Cardiology
-  STRUCT('Cardiology', 'Large Metro', 0.27),
-  STRUCT('Cardiology', 'Metro',       0.27),
-  STRUCT('Cardiology', 'Micro',       0.23),
-  STRUCT('Cardiology', 'Rural',       0.23),
-  STRUCT('Cardiology', 'CEAC',        0.23),
-  -- Chiropractor
-  STRUCT('Chiropractor', 'Large Metro', 0.10),
-  STRUCT('Chiropractor', 'Metro',       0.10),
-  STRUCT('Chiropractor', 'Micro',       0.09),
-  STRUCT('Chiropractor', 'Rural',       0.09),
-  STRUCT('Chiropractor', 'CEAC',        0.09),
-  -- Clinical Psychology
-  STRUCT('Clinical Psychology', 'Large Metro', 0.15),
-  STRUCT('Clinical Psychology', 'Metro',       0.15),
-  STRUCT('Clinical Psychology', 'Micro',       0.13),
-  STRUCT('Clinical Psychology', 'Rural',       0.13),
-  STRUCT('Clinical Psychology', 'CEAC',        0.13),
-  -- Clinical Social Work
-  STRUCT('Clinical Social Work', 'Large Metro', 0.25),
-  STRUCT('Clinical Social Work', 'Metro',       0.25),
-  STRUCT('Clinical Social Work', 'Micro',       0.22),
-  STRUCT('Clinical Social Work', 'Rural',       0.22),
-  STRUCT('Clinical Social Work', 'CEAC',        0.22),
-  -- Dermatology
-  STRUCT('Dermatology', 'Large Metro', 0.16),
-  STRUCT('Dermatology', 'Metro',       0.16),
-  STRUCT('Dermatology', 'Micro',       0.14),
-  STRUCT('Dermatology', 'Rural',       0.14),
-  STRUCT('Dermatology', 'CEAC',        0.14),
-  -- Endocrinology
-  STRUCT('Endocrinology', 'Large Metro', 0.04),
-  STRUCT('Endocrinology', 'Metro',       0.04),
-  STRUCT('Endocrinology', 'Micro',       0.03),
-  STRUCT('Endocrinology', 'Rural',       0.03),
-  STRUCT('Endocrinology', 'CEAC',        0.03),
-  -- ENT/Otolaryngology
-  STRUCT('ENT/Otolaryngology', 'Large Metro', 0.06),
-  STRUCT('ENT/Otolaryngology', 'Metro',       0.06),
-  STRUCT('ENT/Otolaryngology', 'Micro',       0.05),
-  STRUCT('ENT/Otolaryngology', 'Rural',       0.05),
-  STRUCT('ENT/Otolaryngology', 'CEAC',        0.05),
-  -- Gastroenterology
-  STRUCT('Gastroenterology', 'Large Metro', 0.12),
-  STRUCT('Gastroenterology', 'Metro',       0.12),
-  STRUCT('Gastroenterology', 'Micro',       0.10),
-  STRUCT('Gastroenterology', 'Rural',       0.10),
-  STRUCT('Gastroenterology', 'CEAC',        0.10),
-  -- General Surgery
-  STRUCT('General Surgery', 'Large Metro', 0.28),
-  STRUCT('General Surgery', 'Metro',       0.28),
-  STRUCT('General Surgery', 'Micro',       0.24),
-  STRUCT('General Surgery', 'Rural',       0.24),
-  STRUCT('General Surgery', 'CEAC',        0.24),
-  -- Gynecology OB/GYN
-  STRUCT('Gynecology OB/GYN', 'Large Metro', 0.04),
-  STRUCT('Gynecology OB/GYN', 'Metro',       0.04),
-  STRUCT('Gynecology OB/GYN', 'Micro',       0.03),
-  STRUCT('Gynecology OB/GYN', 'Rural',       0.03),
-  STRUCT('Gynecology OB/GYN', 'CEAC',        0.03),
-  -- Infectious Diseases
-  STRUCT('Infectious Diseases', 'Large Metro', 0.03),
-  STRUCT('Infectious Diseases', 'Metro',       0.03),
-  STRUCT('Infectious Diseases', 'Micro',       0.03),
-  STRUCT('Infectious Diseases', 'Rural',       0.03),
-  STRUCT('Infectious Diseases', 'CEAC',        0.03),
-  -- Nephrology
-  STRUCT('Nephrology', 'Large Metro', 0.09),
-  STRUCT('Nephrology', 'Metro',       0.09),
-  STRUCT('Nephrology', 'Micro',       0.08),
-  STRUCT('Nephrology', 'Rural',       0.08),
-  STRUCT('Nephrology', 'CEAC',        0.08),
-  -- Neurology
-  STRUCT('Neurology', 'Large Metro', 0.12),
-  STRUCT('Neurology', 'Metro',       0.12),
-  STRUCT('Neurology', 'Micro',       0.10),
-  STRUCT('Neurology', 'Rural',       0.10),
-  STRUCT('Neurology', 'CEAC',        0.10),
-  -- Neurosurgery
-  STRUCT('Neurosurgery', 'Large Metro', 0.01),
-  STRUCT('Neurosurgery', 'Metro',       0.01),
-  STRUCT('Neurosurgery', 'Micro',       0.01),
-  STRUCT('Neurosurgery', 'Rural',       0.01),
-  STRUCT('Neurosurgery', 'CEAC',        0.01),
-  -- Oncology Medical/Surgical
-  STRUCT('Oncology Medical/Surgical', 'Large Metro', 0.19),
-  STRUCT('Oncology Medical/Surgical', 'Metro',       0.19),
-  STRUCT('Oncology Medical/Surgical', 'Micro',       0.16),
-  STRUCT('Oncology Medical/Surgical', 'Rural',       0.16),
-  STRUCT('Oncology Medical/Surgical', 'CEAC',        0.16),
-  -- Oncology Radiation
-  STRUCT('Oncology Radiation', 'Large Metro', 0.06),
-  STRUCT('Oncology Radiation', 'Metro',       0.06),
-  STRUCT('Oncology Radiation', 'Micro',       0.05),
-  STRUCT('Oncology Radiation', 'Rural',       0.05),
-  STRUCT('Oncology Radiation', 'CEAC',        0.05),
-  -- Ophthalmology
-  STRUCT('Ophthalmology', 'Large Metro', 0.24),
-  STRUCT('Ophthalmology', 'Metro',       0.24),
-  STRUCT('Ophthalmology', 'Micro',       0.20),
-  STRUCT('Ophthalmology', 'Rural',       0.20),
-  STRUCT('Ophthalmology', 'CEAC',        0.20),
-  -- Orthopedic Surgery
-  STRUCT('Orthopedic Surgery', 'Large Metro', 0.20),
-  STRUCT('Orthopedic Surgery', 'Metro',       0.20),
-  STRUCT('Orthopedic Surgery', 'Micro',       0.17),
-  STRUCT('Orthopedic Surgery', 'Rural',       0.17),
-  STRUCT('Orthopedic Surgery', 'CEAC',        0.17),
-  -- Physiatry Rehabilitative Med
-  STRUCT('Physiatry Rehabilitative Med', 'Large Metro', 0.04),
-  STRUCT('Physiatry Rehabilitative Med', 'Metro',       0.04),
-  STRUCT('Physiatry Rehabilitative Med', 'Micro',       0.03),
-  STRUCT('Physiatry Rehabilitative Med', 'Rural',       0.03),
-  STRUCT('Physiatry Rehabilitative Med', 'CEAC',        0.03),
-  -- Plastic Surgery
-  STRUCT('Plastic Surgery', 'Large Metro', 0.01),
-  STRUCT('Plastic Surgery', 'Metro',       0.01),
-  STRUCT('Plastic Surgery', 'Micro',       0.01),
-  STRUCT('Plastic Surgery', 'Rural',       0.01),
-  STRUCT('Plastic Surgery', 'CEAC',        0.01),
-  -- Podiatry
-  STRUCT('Podiatry', 'Large Metro', 0.19),
-  STRUCT('Podiatry', 'Metro',       0.19),
-  STRUCT('Podiatry', 'Micro',       0.16),
-  STRUCT('Podiatry', 'Rural',       0.16),
-  STRUCT('Podiatry', 'CEAC',        0.16),
-  -- Psychiatry
-  STRUCT('Psychiatry', 'Large Metro', 0.14),
-  STRUCT('Psychiatry', 'Metro',       0.14),
-  STRUCT('Psychiatry', 'Micro',       0.12),
-  STRUCT('Psychiatry', 'Rural',       0.12),
-  STRUCT('Psychiatry', 'CEAC',        0.12),
-  -- Pulmonology
-  STRUCT('Pulmonology', 'Large Metro', 0.13),
-  STRUCT('Pulmonology', 'Metro',       0.13),
-  STRUCT('Pulmonology', 'Micro',       0.11),
-  STRUCT('Pulmonology', 'Rural',       0.11),
-  STRUCT('Pulmonology', 'CEAC',        0.11),
-  -- Rheumatology
-  STRUCT('Rheumatology', 'Large Metro', 0.07),
-  STRUCT('Rheumatology', 'Metro',       0.07),
-  STRUCT('Rheumatology', 'Micro',       0.06),
-  STRUCT('Rheumatology', 'Rural',       0.06),
-  STRUCT('Rheumatology', 'CEAC',        0.06),
-  -- Urology
-  STRUCT('Urology', 'Large Metro', 0.12),
-  STRUCT('Urology', 'Metro',       0.12),
-  STRUCT('Urology', 'Micro',       0.10),
-  STRUCT('Urology', 'Rural',       0.10),
-  STRUCT('Urology', 'CEAC',        0.10),
-  -- Vascular Surgery
-  STRUCT('Vascular Surgery', 'Large Metro', 0.02),
-  STRUCT('Vascular Surgery', 'Metro',       0.02),
-  STRUCT('Vascular Surgery', 'Micro',       0.02),
-  STRUCT('Vascular Surgery', 'Rural',       0.02),
-  STRUCT('Vascular Surgery', 'CEAC',        0.02),
-  -- Cardiothoracic Surgery
-  STRUCT('Cardiothoracic Surgery', 'Large Metro', 0.01),
-  STRUCT('Cardiothoracic Surgery', 'Metro',       0.01),
-  STRUCT('Cardiothoracic Surgery', 'Micro',       0.01),
-  STRUCT('Cardiothoracic Surgery', 'Rural',       0.01),
-  STRUCT('Cardiothoracic Surgery', 'CEAC',        0.01),
-  -- Acute Inpatient Hospitals (beds per 1,000 not providers)
-  STRUCT('Acute Inpatient Hospitals', 'Large Metro', 12.2),
-  STRUCT('Acute Inpatient Hospitals', 'Metro',       12.2),
-  STRUCT('Acute Inpatient Hospitals', 'Micro',       12.2),
-  STRUCT('Acute Inpatient Hospitals', 'Rural',       12.2),
-  STRUCT('Acute Inpatient Hospitals', 'CEAC',        12.2),
-  -- All other facility types: minimum = 1 per county per 422.116
-  STRUCT('Cardiac Surgery Program',      'Large Metro', 1.0),
-  STRUCT('Cardiac Surgery Program',      'Metro',       1.0),
-  STRUCT('Cardiac Surgery Program',      'Micro',       1.0),
-  STRUCT('Cardiac Surgery Program',      'Rural',       1.0),
-  STRUCT('Cardiac Surgery Program',      'CEAC',        1.0),
-  STRUCT('Cardiac Catheterization',      'Large Metro', 1.0),
-  STRUCT('Cardiac Catheterization',      'Metro',       1.0),
-  STRUCT('Cardiac Catheterization',      'Micro',       1.0),
-  STRUCT('Cardiac Catheterization',      'Rural',       1.0),
-  STRUCT('Cardiac Catheterization',      'CEAC',        1.0),
-  STRUCT('Critical Care ICU',            'Large Metro', 1.0),
-  STRUCT('Critical Care ICU',            'Metro',       1.0),
-  STRUCT('Critical Care ICU',            'Micro',       1.0),
-  STRUCT('Critical Care ICU',            'Rural',       1.0),
-  STRUCT('Critical Care ICU',            'CEAC',        1.0),
-  STRUCT('Surgical Services ASC',        'Large Metro', 1.0),
-  STRUCT('Surgical Services ASC',        'Metro',       1.0),
-  STRUCT('Surgical Services ASC',        'Micro',       1.0),
-  STRUCT('Surgical Services ASC',        'Rural',       1.0),
-  STRUCT('Surgical Services ASC',        'CEAC',        1.0),
-  STRUCT('Skilled Nursing Facility',     'Large Metro', 1.0),
-  STRUCT('Skilled Nursing Facility',     'Metro',       1.0),
-  STRUCT('Skilled Nursing Facility',     'Micro',       1.0),
-  STRUCT('Skilled Nursing Facility',     'Rural',       1.0),
-  STRUCT('Skilled Nursing Facility',     'CEAC',        1.0),
-  STRUCT('Diagnostic Radiology',         'Large Metro', 1.0),
-  STRUCT('Diagnostic Radiology',         'Metro',       1.0),
-  STRUCT('Diagnostic Radiology',         'Micro',       1.0),
-  STRUCT('Diagnostic Radiology',         'Rural',       1.0),
-  STRUCT('Diagnostic Radiology',         'CEAC',        1.0),
-  STRUCT('Mammography',                  'Large Metro', 1.0),
-  STRUCT('Mammography',                  'Metro',       1.0),
-  STRUCT('Mammography',                  'Micro',       1.0),
-  STRUCT('Mammography',                  'Rural',       1.0),
-  STRUCT('Mammography',                  'CEAC',        1.0),
-  STRUCT('Physical Therapy',             'Large Metro', 1.0),
-  STRUCT('Physical Therapy',             'Metro',       1.0),
-  STRUCT('Physical Therapy',             'Micro',       1.0),
-  STRUCT('Physical Therapy',             'Rural',       1.0),
-  STRUCT('Physical Therapy',             'CEAC',        1.0),
-  STRUCT('Occupational Therapy',         'Large Metro', 1.0),
-  STRUCT('Occupational Therapy',         'Metro',       1.0),
-  STRUCT('Occupational Therapy',         'Micro',       1.0),
-  STRUCT('Occupational Therapy',         'Rural',       1.0),
-  STRUCT('Occupational Therapy',         'CEAC',        1.0),
-  STRUCT('Speech Therapy',               'Large Metro', 1.0),
-  STRUCT('Speech Therapy',               'Metro',       1.0),
-  STRUCT('Speech Therapy',               'Micro',       1.0),
-  STRUCT('Speech Therapy',               'Rural',       1.0),
-  STRUCT('Speech Therapy',               'CEAC',        1.0),
-  STRUCT('Inpatient Psychiatric',        'Large Metro', 1.0),
-  STRUCT('Inpatient Psychiatric',        'Metro',       1.0),
-  STRUCT('Inpatient Psychiatric',        'Micro',       1.0),
-  STRUCT('Inpatient Psychiatric',        'Rural',       1.0),
-  STRUCT('Inpatient Psychiatric',        'CEAC',        1.0),
-  STRUCT('Outpatient Infusion/Chemo',    'Large Metro', 1.0),
-  STRUCT('Outpatient Infusion/Chemo',    'Metro',       1.0),
-  STRUCT('Outpatient Infusion/Chemo',    'Micro',       1.0),
-  STRUCT('Outpatient Infusion/Chemo',    'Rural',       1.0),
-  STRUCT('Outpatient Infusion/Chemo',    'CEAC',        1.0),
-  STRUCT('Outpatient Behavioral Health', 'Large Metro', 1.0),
-  STRUCT('Outpatient Behavioral Health', 'Metro',       1.0),
-  STRUCT('Outpatient Behavioral Health', 'Micro',       1.0),
-  STRUCT('Outpatient Behavioral Health', 'Rural',       1.0),
-  STRUCT('Outpatient Behavioral Health', 'CEAC',        1.0)
-]);
-
-
--- ============================================================
--- TABLE 4: ref_county_classification
--- PURPOSE: FLORIDA COUNTY TYPE CLASSIFICATION PER 42 CFR 422.116
--- SOURCE:  bigquery-public-data.geo_us_boundaries.counties
---          bigquery-public-data.census_bureau_acs.county_2020_5yr
--- GRAIN:   county_fips x county_name
--- KEY COLS: int_point_geom = centroid, county_geom = polygon
+-- STEP 3: ref_county_classification
+-- WHAT:   Classifies all 67 Florida counties into CMS county
+--         types: Large Metro, Metro, Micro, Rural, CEAC.
+--         Also stores compliance threshold (90% or 85%) and
+--         county radius for confidence interval calculation.
+-- WHY:    County type drives which distance + ratio thresholds
+--         apply per 42 CFR 422.116. Compliance threshold
+--         determines pass/fail in fact_gap_analysis.
+-- SOURCE: bigquery-public-data.geo_us_boundaries.counties
+--         bigquery-public-data.census_bureau_acs.county_2020_5yr
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_county_classification`
@@ -616,9 +378,6 @@ OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
 
 WITH raw_counties AS (
-  -- --------------------------------------------------------
-  -- FLORIDA COUNTIES: GEO + AREA + CENTROID
-  -- --------------------------------------------------------
   SELECT
     geo_id                                                           AS county_fips,
     county_name,
@@ -629,9 +388,6 @@ WITH raw_counties AS (
 ),
 
 population AS (
-  -- --------------------------------------------------------
-  -- FLORIDA COUNTY POPULATION FROM ACS 2020 5-YEAR
-  -- --------------------------------------------------------
   SELECT
     geo_id                                                           AS county_fips,
     total_pop
@@ -644,22 +400,14 @@ joined AS (
     r.county_fips,
     r.county_name,
     r.area_sq_miles,
-    r.county_centroid,
-    ST_Y(r.county_centroid)                                         AS county_lat,
-    ST_X(r.county_centroid)                                         AS county_long,
     p.total_pop                                                      AS population,
     ROUND(p.total_pop / NULLIF(r.area_sq_miles, 0), 2)             AS pop_density,
-    -- county radius for confidence interval: approximate circle radius
     ROUND(SQRT(r.area_sq_miles / ACOS(-1)), 2)                     AS county_radius_miles
   FROM raw_counties r
   LEFT JOIN population p USING (county_fips)
 ),
 
 classified AS (
-  -- --------------------------------------------------------
-  -- APPLY 42 CFR 422.116 COUNTY TYPE RULES
-  -- PRIORITY ORDER: LARGE METRO > METRO > MICRO > CEAC > RURAL
-  -- --------------------------------------------------------
   SELECT
     *,
     CASE
@@ -688,11 +436,7 @@ SELECT
   area_sq_miles,
   pop_density,
   county_radius_miles,
-  county_lat,
-  county_long,
-  county_centroid,
   county_type,
-  -- compliance threshold per 422.116 d(4)
   CASE
     WHEN county_type IN ('Large Metro', 'Metro') THEN 0.90
     ELSE 0.85
@@ -702,16 +446,22 @@ ORDER BY county_type, county_name;
 
 
 -- ============================================================
--- TABLE 5: ref_zip_reference
--- PURPOSE: ZIP CODE GEO REFERENCE FOR FLORIDA
---          CENTROID LAT/LONG, AREA, RADIUS, COUNTY MAPPING
---          POPULATION FROM ACS 2018 5-YEAR
--- SOURCE:  bigquery-public-data.geo_us_boundaries.zip_codes
---          bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr
---          bigquery-public-data.geo_us_boundaries.counties
--- GRAIN:   zip_code
--- KEY COLS: internal_point_geom = centroid, zip_code_geom = polygon
---           int_point_geom = county centroid, county_geom = county polygon
+-- STEP 4: ref_zip_reference
+-- WHAT:   Master geographic lookup for all Florida zip codes.
+--         Contains zip centroid lat/long, area, radius, and
+--         county mapping via spatial intersection.
+-- WHY:    Single source of truth for all geo information used
+--         in distance calculations. Both stg_beneficiaries and
+--         stg_providers_multi_specialty join here for lat/long.
+--         Zip radius used for confidence interval calculation.
+-- SOURCE: bigquery-public-data.geo_us_boundaries.zip_codes
+--         bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr
+--         bigquery-public-data.geo_us_boundaries.counties
+-- NOTE:   ST_INTERSECTS used to catch border zips (GA/AL)
+--         that serve FL members — intentional design decision.
+--         zip_centroid excluded from SELECT (GEOGRAPHY type
+--         incompatible with GROUP BY). Reconstructed at query
+--         time via ST_GEOGPOINT(zip_long, zip_lat).
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_zip_reference`
@@ -719,17 +469,12 @@ OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
 
 WITH florida_zips AS (
-  -- --------------------------------------------------------
-  -- GET ALL ZIPS THAT INTERSECT FLORIDA COUNTIES
-  -- USE ST_INTERSECTS AGAINST COUNTY POLYGONS
-  -- --------------------------------------------------------
   SELECT
     z.zip_code,
     z.area_land_meters / 2589988.11                                 AS area_sq_miles,
     ROUND(SQRT((z.area_land_meters / 2589988.11) / ACOS(-1)), 2)   AS zip_radius_miles,
     ST_Y(z.internal_point_geom)                                     AS zip_lat,
     ST_X(z.internal_point_geom)                                     AS zip_long,
-    z.internal_point_geom                                           AS zip_centroid,
     z.zip_code_geom
   FROM `bigquery-public-data.geo_us_boundaries.zip_codes` z
   WHERE EXISTS (
@@ -741,10 +486,6 @@ WITH florida_zips AS (
 ),
 
 zip_population AS (
-  -- --------------------------------------------------------
-  -- ZIP LEVEL POPULATION FROM ACS 2018 5-YEAR
-  -- NOTE: geo_id = 5 digit zip code
-  -- --------------------------------------------------------
   SELECT
     geo_id                                                           AS zip_code,
     total_pop
@@ -752,10 +493,6 @@ zip_population AS (
 ),
 
 zip_to_county AS (
-  -- --------------------------------------------------------
-  -- MAP EACH ZIP TO ITS PRIMARY COUNTY
-  -- USING LARGEST INTERSECTION AREA WHERE ZIP CROSSES BOUNDARY
-  -- --------------------------------------------------------
   SELECT
     z.zip_code,
     c.geo_id                                                         AS county_fips,
@@ -795,89 +532,23 @@ ORDER BY z.zip_code;
 
 
 -- ============================================================
--- TABLE 6: stg_beneficiaries
--- PURPOSE: BENEFICIARY DEMAND BY ZIP CODE FOR FLORIDA
--- SOURCE:  bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr
---          A870800_medicare_supply_demand_ref_zip_reference
---          anbc-hcb-prod cms_medicare_penetration (county validation)
--- GRAIN:   zip_code
--- NOTE:    PRIMARY DEMAND = ACS 2018 zip population
---          CMS PENETRATION = county level validation/context only
--- ============================================================
-
-CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_beneficiaries`
-OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
-AS
-
-WITH latest_penetration AS (
-  -- --------------------------------------------------------
-  -- GET MOST RECENT CMS PENETRATION FILE
-  -- USED FOR COUNTY LEVEL VALIDATION CONTEXT ONLY
-  -- --------------------------------------------------------
-  SELECT MAX(ingest_time) AS max_ingest
-  FROM `anbc-hcb-prod.provider_ds_netconf_data_hcb_prod.cms_medicare_penetration`
-),
-
-county_penetration AS (
-  -- --------------------------------------------------------
-  -- FLORIDA COUNTY LEVEL MA PENETRATION
-  -- BUILD FULL 5-DIGIT FIPS FROM fipsst + fipscnty
-  -- --------------------------------------------------------
-  SELECT
-    CONCAT(
-      LPAD(CAST(fipsst   AS STRING), 2, '0'),
-      LPAD(CAST(fipscnty AS STRING), 3, '0')
-    )                                                                AS county_fips,
-    county_name,
-    SAFE_CAST(REPLACE(CAST(eligibles AS STRING), ',', '') AS FLOAT64) AS county_eligibles,
-    enrolled                                                         AS county_ma_enrolled,
-    SAFE_CAST(REPLACE(penetration, '%', '') AS FLOAT64) / 100       AS county_penetration_rate,
-    ingest_time                                                      AS data_as_of
-  FROM `anbc-hcb-prod.provider_ds_netconf_data_hcb_prod.cms_medicare_penetration`
-  CROSS JOIN latest_penetration
-  WHERE fipsst = '12'
-    AND ingest_time = latest_penetration.max_ingest
-)
-
-SELECT
-  z.zip_code,
-  z.zip_population                                                   AS total_population,
-  z.zip_radius_miles,
-  z.county_fips,
-  z.county_name,
-  z.county_type,
-  z.compliance_threshold,
-  -- county level cms context for gap calculation denominator only
-  p.county_eligibles,
-  p.county_ma_enrolled,
-  p.county_penetration_rate,
-  p.data_as_of
-FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_zip_reference` z
-LEFT JOIN county_penetration p
-  ON z.county_fips = p.county_fips
-ORDER BY z.zip_code;
-
-
--- ============================================================
--- TABLE 7: ref_county_name_crosswalk
--- PURPOSE: MAP AETNA COUNTY NAMES TO CENSUS COUNTY NAMES + FIPS
--- SOURCE:  mbr_with_zip (aetna) vs ref_county_classification (census)
--- GRAIN:   aetna_county_nm
+-- STEP 5: ref_county_name_crosswalk
+-- WHAT:   Maps Aetna county names to Census county names and
+--         FIPS codes. Handles 3 known name mismatches.
+--         Flags 26 Florida counties with no Aetna coverage.
+-- WHY:    Aetna uses different county name formats than Census.
+--         Without this crosswalk, county joins fail silently.
 -- KNOWN MISMATCHES:
---   Desoto      → DeSoto
---   Saint Johns → St. Johns
---   Saint Lucie → St. Lucie
--- NOTE: 41 Aetna counties vs 67 Census counties
---       26 counties have no Aetna providers - flagged as no_coverage
+--   Desoto      → DeSoto   (12027)
+--   Saint Johns → St. Johns (12109)
+--   Saint Lucie → St. Lucie (12111)
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_county_name_crosswalk`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
 SELECT * FROM UNNEST([
-  -- --------------------------------------------------------
-  -- EXACT MATCHES (38 counties)
-  -- --------------------------------------------------------
+  -- exact matches (38 counties)
   STRUCT('Alachua'      AS aetna_county_nm, 'Alachua'      AS census_county_nm, '12001' AS county_fips, 'exact'      AS match_type),
   STRUCT('Baker',                           'Baker',                             '12003',               'exact'),
   STRUCT('Brevard',                         'Brevard',                           '12009',               'exact'),
@@ -916,16 +587,11 @@ SELECT * FROM UNNEST([
   STRUCT('Sumter',                          'Sumter',                            '12119',               'exact'),
   STRUCT('Volusia',                         'Volusia',                           '12127',               'exact'),
   STRUCT('Walton',                          'Walton',                            '12131',               'exact'),
-  -- --------------------------------------------------------
-  -- NAME MISMATCH FIXES (3 counties)
-  -- --------------------------------------------------------
+  -- name mismatch fixes (3 counties)
   STRUCT('Desoto',                          'DeSoto',                            '12027',               'name_fix'),
   STRUCT('Saint Johns',                     'St. Johns',                         '12109',               'name_fix'),
   STRUCT('Saint Lucie',                     'St. Lucie',                         '12111',               'name_fix'),
-  -- --------------------------------------------------------
-  -- NO AETNA COVERAGE (26 counties)
-  -- PRESENT IN CENSUS NOT IN AETNA PROVIDER FILE
-  -- --------------------------------------------------------
+  -- no Aetna coverage (26 counties)
   STRUCT(NULL,                              'Bay',                               '12005',               'no_coverage'),
   STRUCT(NULL,                              'Bradford',                          '12007',               'no_coverage'),
   STRUCT(NULL,                              'Calhoun',                           '12013',               'no_coverage'),
@@ -956,34 +622,125 @@ SELECT * FROM UNNEST([
 
 
 -- ============================================================
--- TABLE 8: stg_providers
--- PURPOSE: SUPPLY SIDE - AETNA CONTRACTED PROVIDERS FOR FLORIDA
--- SOURCE:  A870800_medicare_supply_demand_mbr_with_zip
---          ref_specialty_crosswalk
---          ref_county_name_crosswalk
---          ref_zip_reference
--- GRAIN:   provider_id x cms_specialty x plan_type x zip_cd
--- NOTE:    ONE AETNA SPECIALTY → MULTIPLE CMS SPECIALTIES (fan out)
---          prod_type: HMO IVL = MA-HMO, PPO IVL = MA-PPO
---          zip_cd already 5 digits, no padding needed
---          snapshot table, no date filter needed
---          lat/long from ref_zip_reference via zip_cd join
+-- STEP 6: ref_hsd_required_counts
+-- WHAT:   Exact required provider and facility counts per
+--         Florida county per specialty. Sourced directly from
+--         CMS 2026 HSD Reference File (published 12-17-2025).
+-- WHY:    Replaces approximated ratio-based calculation.
+--         CMS uses 95th percentile base population ratio which
+--         we cannot derive from available data. This table
+--         gives us the exact numbers CMS uses for compliance.
+-- SOURCE: CMS 2026 HSD Reference File
+--         https://www.cms.gov/medicare/health-drug-plans/
+--         medicare-advantage-application
+-- NOTE:   Loaded via load_hsd_to_bq.ipynb notebook.
+--         Run notebook before running this step if table
+--         does not exist.
 -- ============================================================
 
-CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_providers`
+-- ref_hsd_required_counts was loaded via notebook.
+-- Verify it exists before proceeding:
+SELECT
+  COUNT(*)                                                           AS total_rows,
+  COUNT(DISTINCT county_name)                                        AS counties,
+  COUNT(DISTINCT cms_specialty)                                      AS specialties
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_hsd_required_counts`;
+-- Expected: 2881 rows, 67 counties, 43 specialties
+
+
+-- ============================================================
+-- STEP 7: stg_beneficiaries
+-- WHAT:   Demand side table. One row per Florida zip code with
+--         total population (ACS 2018) and county context
+--         including CMS Medicare eligible counts.
+-- WHY:    Population is the demand measure. Used in:
+--         - fact_zip_access: bene zip is the center point
+--           for distance calculation
+--         - fact_gap_analysis: population denominator for
+--           pct_covered calculation
+-- NOTE:   lat/long NOT stored here. Joined from ref_zip_reference
+--         at distance calculation time only.
+--         county_eligibles from CMS penetration file used as
+--         denominator for HSD required count validation only.
+-- ============================================================
+
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_beneficiaries`
 OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
 
-WITH florida_providers AS (
-  -- --------------------------------------------------------
-  -- FILTER TO FLORIDA ONLY
-  -- MAP prod_type TO CMS PLAN TYPE LABELS
-  -- --------------------------------------------------------
+WITH latest_penetration AS (
+  SELECT MAX(ingest_time) AS max_ingest
+  FROM `anbc-hcb-prod.provider_ds_netconf_data_hcb_prod.cms_medicare_penetration`
+),
+
+county_penetration AS (
   SELECT
-    prvdr_id_no                                                      AS provider_id,
+    CONCAT(
+      LPAD(CAST(fipsst   AS STRING), 2, '0'),
+      LPAD(CAST(fipscnty AS STRING), 3, '0')
+    )                                                                AS county_fips,
+    SAFE_CAST(REPLACE(CAST(eligibles AS STRING), ',', '') AS FLOAT64) AS county_eligibles,
+    enrolled                                                         AS county_ma_enrolled,
+    SAFE_CAST(REPLACE(penetration, '%', '') AS FLOAT64) / 100       AS county_penetration_rate,
+    ingest_time                                                      AS data_as_of
+  FROM `anbc-hcb-prod.provider_ds_netconf_data_hcb_prod.cms_medicare_penetration`
+  CROSS JOIN latest_penetration
+  WHERE fipsst = '12'
+    AND ingest_time = latest_penetration.max_ingest
+)
+
+SELECT
+  z.zip_code,
+  z.zip_population                                                   AS total_population,
+  z.zip_radius_miles,
+  z.county_fips,
+  z.county_name,
+  z.county_type,
+  z.compliance_threshold,
+  p.county_eligibles,
+  p.county_ma_enrolled,
+  p.county_penetration_rate,
+  p.data_as_of
+FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_zip_reference` z
+LEFT JOIN county_penetration p
+  ON z.county_fips = p.county_fips
+ORDER BY z.zip_code;
+
+
+-- ============================================================
+-- STEP 8: stg_providers_multi_specialty
+-- WHAT:   Supply side table. One row per provider per specialty
+--         per plan type. Uses network ID explosion to get ALL
+--         specialties per provider, not just primary specialty.
+-- WHY:    A multi-specialty provider (e.g. hospital) counts
+--         toward multiple CMS specialty requirements. Using
+--         only primary specialty undercounts supply.
+-- SOURCE: A870800_medicare_supply_demand_mbr_with_zip
+--         edp-prod-hcbstorage.edp_hcb_core_cnsv.RPDB_RPNPRAC
+--         edp-prod-hcbstorage.edp_hcb_core_srcv.EPDB_PRVDR
+--         edp-prod-hcbstorage.edp_hcb_core_srcv.RPDB_RINPR
+--         edp-prod-hcbstorage.edp_hcb_core_cnsv.PRVDR_TY_X_SPCLTY
+--         edp-prod-hcbstorage.edp_hcb_core_srcv.GLOBAL_LOOKUP
+-- NOTE:   SAFE_CAST used throughout - data quality is poor.
+--         NULL guards on join keys prevent phantom matches
+--         from CAST(NULL AS STRING) = 'null' in BigQuery.
+--         Providers with no cms_specialty or zip_lat match
+--         are excluded (out of state / unmapped specialties).
+-- ============================================================
+
+CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_providers_multi_specialty`
+OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
+AS
+
+WITH mbr_exploded AS (
+  -- explode network_id on '-' delimiter to get individual network IDs
+  -- SAFE_CAST protects against empty or non-numeric segments
+  SELECT DISTINCT
+    CAST(prvdr_id_no AS INT64)                                       AS pin,
+    SAFE_CAST(TRIM(ntwk_id_exploded) AS INT64)                      AS ntwk_id_no,
+    CAST(prvdr_id_no AS STRING)                                     AS provider_id,
     tin_owner_nm                                                     AS provider_name,
     tax_id_no,
-    specialty_ctg_cd,
     county_nm,
     zip_cd,
     market,
@@ -994,135 +751,147 @@ WITH florida_providers AS (
       ELSE prod_type
     END                                                              AS plan_type
   FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_mbr_with_zip`
+  CROSS JOIN UNNEST(SPLIT(network_id, '-'))                         AS ntwk_id_exploded
   WHERE state = 'FL'
+    AND network_id IS NOT NULL
+    AND TRIM(ntwk_id_exploded) != ''
 ),
 
-mapped_specialty AS (
-  -- --------------------------------------------------------
-  -- JOIN TO SPECIALTY CROSSWALK
-  -- INTENTIONAL FAN OUT: ONE AETNA CODE → MULTIPLE CMS SPECIALTIES
-  -- E.G. VVRH → Physical Therapy + Occupational Therapy + Speech Therapy
-  -- --------------------------------------------------------
-  SELECT
-    p.provider_id,
-    p.provider_name,
-    p.tax_id_no,
-    p.specialty_ctg_cd                                               AS aetna_specialty_cd,
-    s.cms_specialty,
-    s.match_type,
-    s.inflated,
-    p.county_nm,
-    p.zip_cd,
-    p.plan_type,
-    p.market,
-    p.submarket
-  FROM florida_providers p
-  LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_specialty_crosswalk` s
-    ON p.specialty_ctg_cd = s.aetna_cd
+rpnprac AS (
+  -- get all specialties per provider via network join
+  -- left join retains providers with no RPDB match
+  -- specialty_cd derived from major + category + subclass codes
+  SELECT DISTINCT
+    a.pin,
+    a.provider_id,
+    a.provider_name,
+    a.tax_id_no,
+    a.county_nm,
+    a.zip_cd,
+    a.plan_type,
+    a.market,
+    a.submarket,
+    b.rpnp_prvdr_type_cd,
+    CASE
+      WHEN TRIM(c.prvdr_info_ty_cd) = 'N'
+        THEN COALESCE(
+          SAFE_CAST(SAFE_CAST(CONCAT(
+            COALESCE(CAST(b.rpnp_spcl_majcl_cd AS STRING), ''),
+            COALESCE(CAST(b.rpnp_spcl_ctgry_cd AS STRING), ''),
+            COALESCE(CAST(b.rpnp_spcl_sbcls_cd AS STRING), '')
+          ) AS INT64) AS STRING),
+          CAST(c.prvdr_type_cd AS STRING))
+      ELSE COALESCE(
+          SAFE_CAST(SAFE_CAST(CONCAT(
+            COALESCE(CAST(b.rpnp_spcl_majcl_cd AS STRING), ''),
+            COALESCE(CAST(b.rpnp_spcl_ctgry_cd AS STRING), ''),
+            COALESCE(CAST(b.rpnp_spcl_sbcls_cd AS STRING), '')
+          ) AS INT64) AS STRING),
+          CAST(d.rip_prvdr_type_cd AS STRING))
+    END                                                              AS specialty_cd
+  FROM mbr_exploded a
+  LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.RPDB_RPNPRAC` b
+    ON CAST(a.ntwk_id_no AS INT64) = CAST(b.ntwk_id_no AS INT64)
+    AND CAST(a.pin AS INT64)       = CAST(b.prvdr_id_no AS INT64) * 100 + 9
+  LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_srcv.EPDB_PRVDR` c
+    ON CAST(a.pin AS INT64) = CAST(c.prvdr_id_no AS INT64) * 100 + 9
+  LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_srcv.RPDB_RINPR` d
+    ON CAST(a.pin AS INT64) = CAST(d.prvdr_id_no AS INT64) * 100 + 9
 ),
 
-mapped_county AS (
-  -- --------------------------------------------------------
-  -- JOIN TO COUNTY NAME CROSSWALK
-  -- RESOLVES AETNA NAME MISMATCHES (Desoto, Saint Johns, Saint Lucie)
-  -- no_coverage COUNTIES → county_fips WILL BE NULL
-  -- --------------------------------------------------------
+specialty_mapped AS (
+  -- map specialty_cd to specialty_ctg_cd via PRVDR_TY_X_SPCLTY
+  -- get descriptions from GLOBAL_LOOKUP
+  -- null guards prevent phantom matches from NULL casts
   SELECT
-    m.provider_id,
-    m.provider_name,
-    m.tax_id_no,
-    m.aetna_specialty_cd,
-    m.cms_specialty,
-    m.match_type,
-    m.inflated,
-    m.county_nm                                                      AS aetna_county_nm,
-    c.census_county_nm,
-    c.county_fips,
-    m.zip_cd,
-    m.plan_type,
-    m.market,
-    m.submarket
-  FROM mapped_specialty m
-  LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_county_name_crosswalk` c
-    ON m.county_nm = c.aetna_county_nm
-),
-
-mapped_zip AS (
-  -- --------------------------------------------------------
-  -- JOIN TO ZIP REFERENCE FOR LAT/LONG + COUNTY TYPE
-  -- lat/long used in fact_zip_access for ST_DISTANCE calc
-  -- zip_centroid excluded - reconstructed at query time via ST_GEOGPOINT
-  -- --------------------------------------------------------
-  SELECT
-    m.provider_id,
-    m.provider_name,
-    m.tax_id_no,
-    m.aetna_specialty_cd,
-    m.cms_specialty,
-    m.match_type,
-    m.inflated,
-    m.aetna_county_nm,
-    m.census_county_nm,
-    m.county_fips,
-    m.zip_cd,
-    z.zip_lat,
-    z.zip_long,
-    z.zip_radius_miles,
-    z.county_type,
-    m.plan_type,
-    m.market,
-    m.submarket
-  FROM mapped_county m
-  LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_zip_reference` z
-    ON m.zip_cd = z.zip_code
+    a.pin,
+    a.provider_id,
+    a.provider_name,
+    a.tax_id_no,
+    a.county_nm,
+    a.zip_cd,
+    a.plan_type,
+    a.market,
+    a.submarket,
+    a.rpnp_prvdr_type_cd,
+    a.specialty_cd,
+    TRIM(b.specialty_ctg_cd)                                        AS specialty_ctg_cd,
+    c.short_dscrptn                                                  AS specialty_cd_desc,
+    d.short_dscrptn                                                  AS specialty_ctg_cd_desc,
+    e.short_dscrptn                                                  AS prvdr_type_desc
+  FROM rpnprac a
+  LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_cnsv.PRVDR_TY_X_SPCLTY` b
+    ON a.rpnp_prvdr_type_cd IS NOT NULL
+    AND a.specialty_cd IS NOT NULL
+    AND TRIM(CAST(a.rpnp_prvdr_type_cd AS STRING)) = TRIM(CAST(b.provider_type_cd AS STRING))
+    AND TRIM(CAST(a.specialty_cd AS STRING))        = TRIM(CAST(b.specialty_cd AS STRING))
+  LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_srcv.GLOBAL_LOOKUP` c
+    ON TRIM(CAST(a.specialty_cd AS STRING))         = TRIM(CAST(c.global_lookup_cd AS STRING))
+    AND c.lookup_column_nm                          = 'SPECIALTY_CD'
+  LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_srcv.GLOBAL_LOOKUP` d
+    ON b.specialty_ctg_cd IS NOT NULL
+    AND TRIM(CAST(b.specialty_ctg_cd AS STRING))    = TRIM(CAST(d.global_lookup_cd AS STRING))
+    AND d.lookup_column_nm                          = 'SPECIALTY_CTG_CD'
+  LEFT JOIN `edp-prod-hcbstorage.edp_hcb_core_srcv.GLOBAL_LOOKUP` e
+    ON TRIM(CAST(a.rpnp_prvdr_type_cd AS STRING))   = TRIM(CAST(e.global_lookup_cd AS STRING))
+    AND e.lookup_column_nm                          = 'PROVIDER_TYPE_CD'
 )
 
--- --------------------------------------------------------
--- FINAL SELECT
--- DEDUP TO GRAIN: provider_id x cms_specialty x plan_type x zip_cd
--- EXCLUDE UNMAPPED SPECIALTIES + OUT OF STATE PROVIDERS
--- GROUP BY ALL instead of DISTINCT - avoids GEOGRAPHY type issues
--- --------------------------------------------------------
 SELECT
-  provider_id,
-  provider_name,
-  tax_id_no,
-  aetna_specialty_cd,
-  cms_specialty,
-  match_type,
-  inflated,
-  aetna_county_nm,
-  census_county_nm,
-  county_fips,
-  zip_cd,
-  zip_lat,
-  zip_long,
-  zip_radius_miles,
-  county_type,
-  plan_type,
-  market,
-  submarket
-FROM mapped_zip
-WHERE cms_specialty IS NOT NULL
-  AND zip_lat IS NOT NULL
+  s.provider_id,
+  s.provider_name,
+  s.tax_id_no,
+  s.rpnp_prvdr_type_cd,
+  s.prvdr_type_desc,
+  s.specialty_cd,
+  s.specialty_cd_desc,
+  s.specialty_ctg_cd                                                AS aetna_specialty_cd,
+  s.specialty_ctg_cd_desc,
+  sc.cms_specialty,
+  sc.match_type,
+  sc.inflated,
+  s.county_nm                                                        AS aetna_county_nm,
+  c.census_county_nm,
+  c.county_fips,
+  s.zip_cd,
+  z.zip_lat,
+  z.zip_long,
+  z.zip_radius_miles,
+  z.county_type,
+  s.plan_type,
+  s.market,
+  s.submarket
+FROM specialty_mapped s
+LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_specialty_crosswalk` sc
+  ON TRIM(CAST(s.specialty_ctg_cd AS STRING)) = TRIM(CAST(sc.aetna_cd AS STRING))
+LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_county_name_crosswalk` c
+  ON TRIM(CAST(s.county_nm AS STRING)) = TRIM(CAST(c.aetna_county_nm AS STRING))
+LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_zip_reference` z
+  ON TRIM(CAST(s.zip_cd AS STRING)) = TRIM(CAST(z.zip_code AS STRING))
+WHERE sc.cms_specialty IS NOT NULL
+  AND z.zip_lat IS NOT NULL
 GROUP BY ALL
-ORDER BY provider_id, cms_specialty, plan_type
+ORDER BY s.provider_id, sc.cms_specialty, s.plan_type;
 
 
 -- ============================================================
--- TABLE 9: fact_zip_access
--- PURPOSE: FOR EACH BENEFICIARY ZIP x SPECIALTY x PLAN TYPE
---          COUNT PROVIDERS WITHIN CMS DISTANCE THRESHOLD
---          TAG ZIP AS HAS_ACCESS (TRUE/FALSE)
--- SOURCE:  stg_beneficiaries
---          stg_providers
---          ref_zip_reference
---          ref_time_distance
--- GRAIN:   bene_zip x cms_specialty x plan_type
--- NOTE:    SPARSE TABLE - ONLY ZIPS WITH AT LEAST 1 PROVIDER SURVIVE
---          ZEROS HANDLED IN fact_gap_analysis VIA LEFT JOIN
---          ST_DISTANCE in meters converted to miles (/1609.34)
---          THRESHOLD USES BENEFICIARY COUNTY TYPE PER 422.116
+-- STEP 9: fact_zip_access
+-- WHAT:   For each beneficiary zip × CMS specialty × plan type,
+--         counts how many contracted providers exist within
+--         the CMS maximum distance threshold.
+--         Tags each zip as has_access = TRUE/FALSE.
+-- WHY:    This is the core distance compliance computation.
+--         CMS requires that X% of beneficiaries in each county
+--         have at least 1 provider within the distance threshold.
+--         This table answers "does this zip have access?"
+--         fact_gap_analysis then rolls this up to county level.
+-- NOTE:   SPARSE TABLE - only rows where at least 1 provider
+--         exists within threshold are stored.
+--         Zips with zero access are handled in fact_gap_analysis
+--         via LEFT JOIN from all_combinations CTE.
+--         Threshold lookup uses BENEFICIARY county type per
+--         42 CFR 422.116 - not provider county type.
+--         ST_DISTANCE returns meters, divided by 1609.34 for miles.
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_fact_zip_access`
@@ -1130,11 +899,8 @@ OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
 
 WITH zip_provider_pairs AS (
-  -- --------------------------------------------------------
-  -- CROSS JOIN BENE ZIPS x PROVIDERS
-  -- FILTER TO PAIRS WITHIN CMS DISTANCE THRESHOLD
-  -- THRESHOLD LOOKUP USES BENEFICIARY COUNTY TYPE
-  -- --------------------------------------------------------
+  -- for each bene zip × provider × specialty × plan type
+  -- apply distance filter: only pairs within CMS threshold survive
   SELECT
     b.zip_code                                                       AS bene_zip,
     b.county_fips                                                    AS bene_county_fips,
@@ -1149,7 +915,6 @@ WITH zip_provider_pairs AS (
     p.inflated,
     p.match_type,
     t.max_distance_miles,
-    -- distance in miles between bene zip centroid and provider zip centroid
     ROUND(
       ST_DISTANCE(
         ST_GEOGPOINT(bene_zip.zip_long, bene_zip.zip_lat),
@@ -1157,32 +922,19 @@ WITH zip_provider_pairs AS (
       ) / 1609.34
     , 2)                                                             AS distance_miles
   FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_beneficiaries` b
-
-  -- get bene zip lat/long from ref_zip_reference
   JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_zip_reference` bene_zip
     ON b.zip_code = bene_zip.zip_code
-
-  -- cross join to all providers
-  -- using multi specialty table - one provider can count toward multiple specialties
   JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_providers_multi_specialty` p
     ON TRUE
-
-  -- threshold lookup: uses beneficiary county type not provider county type
   JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_time_distance` t
     ON t.cms_specialty = p.cms_specialty
     AND t.county_type  = b.county_type
-
-  -- core filter: only provider zips within CMS threshold survive
   WHERE ST_DISTANCE(
           ST_GEOGPOINT(bene_zip.zip_long, bene_zip.zip_lat),
           ST_GEOGPOINT(p.zip_long,        p.zip_lat)
         ) / 1609.34 <= t.max_distance_miles
 )
 
--- --------------------------------------------------------
--- AGGREGATE TO GRAIN: bene_zip x cms_specialty x plan_type
--- COUNT DISTINCT PROVIDERS WITHIN THRESHOLD
--- --------------------------------------------------------
 SELECT
   bene_zip,
   bene_county_fips,
@@ -1215,19 +967,24 @@ GROUP BY
 
 
 -- ============================================================
--- TABLE 10: fact_gap_analysis
--- PURPOSE: COUNTY LEVEL COMPLIANCE ROLLUP
---          % BENEFICIARIES WITH ACCESS vs CMS THRESHOLD
---          ACTUAL vs REQUIRED PROVIDER COUNT
---          FINAL COMPLIANCE FLAG PER COUNTY x SPECIALTY x PLAN TYPE
--- SOURCE:  fact_zip_access
---          ref_min_ratio
---          stg_beneficiaries
---          ref_specialty_crosswalk
--- GRAIN:   county_fips x cms_specialty x plan_type
--- NOTE:    LEFT JOIN from all zip x specialty x plan_type combinations
---          ensures zips with ZERO providers are included as NO_ACCESS
---          county_eligibles cast to FLOAT64 for ratio calculation
+-- STEP 10: fact_gap_analysis
+-- WHAT:   Final county-level compliance output.
+--         For each county × specialty × plan type:
+--         - % beneficiaries with at least 1 provider in range
+--         - actual provider count vs CMS required count
+--         - compliance status (COMPLIANT / NON-COMPLIANT)
+-- WHY:    CMS evaluates compliance at county level.
+--         Two tests must both pass per 42 CFR 422.116:
+--         Test 1: pct_covered >= 90% (Large Metro/Metro)
+--                              >= 85% (Micro/Rural/CEAC)
+--         Test 2: actual_provider_count >= required_count
+--                 (from CMS 2026 HSD Reference File)
+-- NOTE:   all_combinations CTE creates complete grid of
+--         county × specialty × plan_type to ensure zips with
+--         zero providers are included as NO_ACCESS = FALSE.
+--         required_count from ref_hsd_required_counts — exact
+--         CMS numbers, no approximation.
+--         county_eligibles used for context only.
 -- ============================================================
 
 CREATE OR REPLACE TABLE `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_fact_gap_analysis`
@@ -1235,11 +992,8 @@ OPTIONS (labels=[("owner", "deepan_thulasi_aetna_com")])
 AS
 
 WITH all_combinations AS (
-  -- --------------------------------------------------------
-  -- BUILD COMPLETE GRID:
-  -- ALL BENE ZIPS x ALL CMS SPECIALTIES x ALL PLAN TYPES
-  -- ENSURES ZERO ACCESS ZIPS ARE NOT SILENTLY DROPPED
-  -- --------------------------------------------------------
+  -- build complete grid: all bene zips × all specialties × all plan types
+  -- ensures zips with no providers are not silently dropped
   SELECT
     b.zip_code,
     b.county_fips,
@@ -1247,7 +1001,6 @@ WITH all_combinations AS (
     b.county_type,
     b.compliance_threshold,
     b.total_population,
-    b.county_eligibles,
     sc.cms_specialty,
     sc.match_type,
     sc.inflated,
@@ -1259,15 +1012,13 @@ WITH all_combinations AS (
   ) sc
   CROSS JOIN (
     SELECT DISTINCT plan_type
-    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_providers`
+    FROM `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_stg_providers_multi_specialty`
   ) pt
 ),
 
 zip_access_complete AS (
-  -- --------------------------------------------------------
-  -- LEFT JOIN FACT_ZIP_ACCESS TO ALL_COMBINATIONS
-  -- FILLS IN ZEROS FOR ZIPS WITH NO PROVIDERS WITHIN THRESHOLD
-  -- --------------------------------------------------------
+  -- left join fact_zip_access to all_combinations
+  -- fills in zeros for zips with no providers within threshold
   SELECT
     a.zip_code,
     a.county_fips,
@@ -1275,7 +1026,6 @@ zip_access_complete AS (
     a.county_type,
     a.compliance_threshold,
     a.total_population,
-    a.county_eligibles,
     a.cms_specialty,
     a.match_type,
     a.inflated,
@@ -1284,15 +1034,14 @@ zip_access_complete AS (
     COALESCE(z.has_access, FALSE)                                    AS has_access
   FROM all_combinations a
   LEFT JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_fact_zip_access` z
-    ON a.zip_code      = z.bene_zip
+    ON a.zip_code       = z.bene_zip
     AND a.cms_specialty = z.cms_specialty
     AND a.plan_type     = z.plan_type
 ),
 
 county_rollup AS (
-  -- --------------------------------------------------------
-  -- ROLL UP TO COUNTY x SPECIALTY x PLAN TYPE
-  -- --------------------------------------------------------
+  -- roll up zip level to county level
+  -- pct_covered = population with access / total county population
   SELECT
     county_fips,
     county_name,
@@ -1302,17 +1051,12 @@ county_rollup AS (
     plan_type,
     inflated,
     match_type,
-    -- cast county_eligibles to FLOAT64 for ratio calculation
-    MAX(SAFE_CAST(REPLACE(CAST(county_eligibles AS STRING), ',', '') AS FLOAT64)) AS county_eligibles,
     SUM(total_population)                                            AS total_county_population,
-    -- population in zips WITH at least 1 provider within threshold
     SUM(CASE WHEN has_access THEN total_population ELSE 0 END)      AS population_with_access,
-    -- pct of county population with access
     ROUND(
       SUM(CASE WHEN has_access THEN total_population ELSE 0 END)
       / NULLIF(SUM(total_population), 0)
     , 4)                                                             AS pct_covered,
-    -- distinct providers within threshold across all zips in county
     SUM(provider_count)                                              AS actual_provider_count
   FROM zip_access_complete
   GROUP BY
@@ -1326,9 +1070,6 @@ county_rollup AS (
     match_type
 )
 
--- --------------------------------------------------------
--- FINAL OUTPUT WITH COMPLIANCE FLAGS
--- --------------------------------------------------------
 SELECT
   r.county_fips,
   r.county_name,
@@ -1337,89 +1078,38 @@ SELECT
   r.plan_type,
   r.inflated,
   r.match_type,
-  r.county_eligibles,
+  hsd.total_beneficiaries                                            AS county_total_beneficiaries,
+  hsd.beneficiaries_required_to_cover,
+  hsd.ratio_95th_percentile,
   r.total_county_population,
   r.population_with_access,
   r.pct_covered,
   r.compliance_threshold,
-
-  -- --------------------------------------------------------
-  -- REQUIRED PROVIDER COUNT PER 422.116
-  -- FACILITY TYPES b(2)(ii) THROUGH b(2)(xiv) = MINIMUM 1 FLAT
-  -- PROVIDER TYPES + ACUTE INPATIENT HOSPITAL = RATIO BASED
-  -- --------------------------------------------------------
-  CASE
-    WHEN r.cms_specialty IN (
-      'Cardiac Surgery Program', 'Cardiac Catheterization',
-      'Critical Care ICU', 'Surgical Services ASC',
-      'Skilled Nursing Facility', 'Diagnostic Radiology',
-      'Mammography', 'Physical Therapy', 'Occupational Therapy',
-      'Speech Therapy', 'Inpatient Psychiatric',
-      'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
-    ) THEN 1
-    ELSE CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
-  END                                                                AS required_provider_count,
+  hsd.required_count                                                 AS required_provider_count,
   r.actual_provider_count,
-
-  -- gap: positive = shortage, negative = surplus
-  CASE
-    WHEN r.cms_specialty IN (
-      'Cardiac Surgery Program', 'Cardiac Catheterization',
-      'Critical Care ICU', 'Surgical Services ASC',
-      'Skilled Nursing Facility', 'Diagnostic Radiology',
-      'Mammography', 'Physical Therapy', 'Occupational Therapy',
-      'Speech Therapy', 'Inpatient Psychiatric',
-      'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
-    ) THEN 1 - r.actual_provider_count
-    ELSE CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
-         - r.actual_provider_count
-  END                                                                AS provider_gap,
-
-  -- test 1: % beneficiaries with access >= threshold
+  hsd.required_count - r.actual_provider_count                      AS provider_gap,
+  -- test 1: % beneficiaries with access >= compliance threshold
   CASE
     WHEN r.pct_covered >= r.compliance_threshold THEN TRUE
     ELSE FALSE
   END                                                                AS access_compliant,
-
-  -- test 2: actual provider count >= required count
+  -- test 2: actual provider count >= CMS required count
   CASE
-    WHEN r.cms_specialty IN (
-      'Cardiac Surgery Program', 'Cardiac Catheterization',
-      'Critical Care ICU', 'Surgical Services ASC',
-      'Skilled Nursing Facility', 'Diagnostic Radiology',
-      'Mammography', 'Physical Therapy', 'Occupational Therapy',
-      'Speech Therapy', 'Inpatient Psychiatric',
-      'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
-    ) THEN r.actual_provider_count >= 1
-    ELSE r.actual_provider_count >=
-         CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
+    WHEN r.actual_provider_count >= hsd.required_count THEN TRUE
+    ELSE FALSE
   END                                                                AS count_compliant,
-
-  -- overall: both tests must pass per 422.116
+  -- overall: both tests must pass per 42 CFR 422.116
   CASE
     WHEN r.pct_covered >= r.compliance_threshold
-    AND (
-      CASE
-        WHEN r.cms_specialty IN (
-          'Cardiac Surgery Program', 'Cardiac Catheterization',
-          'Critical Care ICU', 'Surgical Services ASC',
-          'Skilled Nursing Facility', 'Diagnostic Radiology',
-          'Mammography', 'Physical Therapy', 'Occupational Therapy',
-          'Speech Therapy', 'Inpatient Psychiatric',
-          'Outpatient Infusion/Chemo', 'Outpatient Behavioral Health'
-        ) THEN r.actual_provider_count >= 1
-        ELSE r.actual_provider_count >=
-             CEIL(m.min_ratio_per_1000 * r.county_eligibles / 1000)
-      END
-    )                                                                THEN 'COMPLIANT'
+    AND  r.actual_provider_count >= hsd.required_count               THEN 'COMPLIANT'
     ELSE 'NON-COMPLIANT'
   END                                                                AS compliance_status
 
 FROM county_rollup r
-JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_min_ratio` m
-  ON m.cms_specialty = r.cms_specialty
-  AND m.county_type  = r.county_type
+JOIN `anbc-hcb-dev.provider_ds_netconf_data_hcb_dev.A870800_medicare_supply_demand_ref_hsd_required_counts` hsd
+  ON hsd.county_name   = r.county_name
+  AND hsd.cms_specialty = r.cms_specialty
 ORDER BY
   r.county_name,
   r.cms_specialty,
-  r.plan_type
+  r.plan_type;
