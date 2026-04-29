@@ -1084,6 +1084,12 @@ SELECT
   r.pct_covered,
   r.compliance_threshold,
   hsd.required_count                                                 AS required_provider_count,
+  -- beds column: populated only for Acute Inpatient Hospitals, NULL for all others
+  CASE
+    WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
+      THEN COALESCE(b.total_contracted_beds, 0)
+    ELSE NULL
+  END                                                                AS total_contracted_beds,
   -- actual count: beds for hospitals, provider count for everything else
   CASE
     WHEN r.cms_specialty = 'Acute Inpatient Hospitals'
