@@ -483,13 +483,14 @@ def build_tab2(wb, df):
     return ws
 
 
-# ── MAIN ─────────────────────────────────────────────────────
-import pandas as pd
-from google.cloud import bigquery
+from openpyxl.formatting.rule import ColorScaleRule
 
-PROJECT = "anbc-hcb-dev"
-DATASET = "provider_ds_netconf_data_hcb_dev"
-PREFIX  = "A870800_medicare_supply_demand"
+# ── TAB 3 defined here before MAIN ───────────────────────────
+
+PROJECT        = "anbc-hcb-dev"           # table project
+CLIENT_PROJECT = "anbc-dev-prv-nc-ds"     # billing/auth project
+DATASET        = "provider_ds_netconf_data_hcb_dev"
+PREFIX         = "A870800_medicare_supply_demand"
 
 COMPLIANCE_QUERY = f"""
 SELECT
@@ -515,12 +516,155 @@ FROM `{PROJECT}.{DATASET}.{PREFIX}_fact_gap_analysis_v2`
 ORDER BY county_name, cms_specialty, plan_type
 """
 
-if __name__ == "__main__":
-    client = bigquery.Client(project=PROJECT)
+SUMMARY_SPECIALTY_QUERY = f"""
+SELECT
+  cms_specialty,
+  plan_type,
+  COUNTIF(compliance_status = 'COMPLIANT')     AS compliant_counties,
+  COUNTIF(compliance_status = 'NON-COMPLIANT') AS non_compliant_counties,
+  COUNT(*)                                      AS total_counties,
+  ROUND(
+    COUNTIF(compliance_status = 'COMPLIANT') / COUNT(*), 4
+  )                                             AS pct_compliant,
+  COUNTIF(access_compliant = FALSE)             AS access_failures,
+  COUNTIF(count_compliant = FALSE)              AS count_failures
+FROM `{PROJECT}.{DATASET}.{PREFIX}_fact_gap_analysis_v2`
+GROUP BY cms_specialty, plan_type
+ORDER BY pct_compliant ASC, cms_specialty, plan_type
+"""
 
-    print("Querying fact_gap_analysis_v2...")
+
+# ── TAB 3: SUMMARY BY PLAN × SPECIALTY ───────────────────────
+
+def build_tab3(wb, df_summary):
+    ws = wb.create_sheet("3. Summary by Specialty")
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A5"
+
+    col_widths = {
+        "A": 30,  # cms specialty
+        "B": 12,  # plan type
+        "C": 16,  # compliant counties
+        "D": 20,  # non-compliant counties
+        "E": 14,  # total counties
+        "F": 14,  # pct compliant
+        "G": 16,  # access failures
+        "H": 16,  # count failures
+    }
+    for col, w in col_widths.items():
+        ws.column_dimensions[col].width = w
+
+    # ── ROW 1: TITLE ─────────────────────────────────────────
+    ws.merge_cells("A1:H1")
+    cell(ws, "A1", "Medicare Supply Demand — Specialty Compliance Summary (V2)",
+         bold=True, color=WHITE, bg=DARK_BLUE, size=14, h_align="center")
+    ws.row_dimensions[1].height = 35
+
+    # ── ROW 2: SUBTITLE ──────────────────────────────────────
+    ws.merge_cells("A2:H2")
+    cell(ws, "A2",
+         "Grain: CMS Specialty × Plan Type  |  Each row = county-level pass/fail counts  |  "
+         "Sorted by % Compliant ascending (worst performing specialties first)",
+         size=9, color="666666", bg="F9F9F9", italic=True, h_align="left")
+    ws.row_dimensions[2].height = 18
+
+    # ── ROW 3: CALLOUTS ──────────────────────────────────────
+    callouts = {
+        "A3": "",
+        "B3": "",
+        "C3": "Counties where BOTH access % AND count standard are met",
+        "D3": "Counties where EITHER access % OR count standard fails",
+        "E3": "Total Florida counties evaluated",
+        "F3": "compliant_counties / total_counties",
+        "G3": "Counties where pct_covered < compliance_threshold",
+        "H3": "Counties where actual_count < required_provider_count",
+    }
+    for ref, txt in callouts.items():
+        cell(ws, ref, txt, size=8, color="666666",
+             bg="F9F9F9", italic=True, wrap=True)
+    ws.row_dimensions[3].height = 28
+
+    # ── ROW 4: HEADERS ───────────────────────────────────────
+    headers = [
+        ("A4", "CMS Specialty",         DARK_GREY),
+        ("B4", "Plan Type",             DARK_GREY),
+        ("C4", "Compliant\nCounties",   "375623"),
+        ("D4", "Non-Compliant\nCounties","C00000"),
+        ("E4", "Total\nCounties",        DARK_BLUE),
+        ("F4", "% Compliant",            DARK_BLUE),
+        ("G4", "Access\nFailures",       MID_BLUE),
+        ("H4", "Count\nFailures",        MID_BLUE),
+    ]
+    ws.row_dimensions[4].height = 35
+    for ref, label, bg in headers:
+        cell(ws, ref, label, bold=True, color=WHITE,
+             bg=bg, size=10, h_align="center", bdr=True)
+
+    # ── DATA ROWS ────────────────────────────────────────────
+    prev_specialty = None
+    alt = True
+
+    for i, (_, row) in enumerate(df_summary.iterrows()):
+        r = i + 5
+
+        # alternate shade per specialty group
+        if row['cms_specialty'] != prev_specialty:
+            alt = not alt
+            prev_specialty = row['cms_specialty']
+        row_bg = GREY if alt else WHITE
+
+        pct = float(row.get('pct_compliant', 0) or 0)
+
+        data = [
+            ("A", row.get('cms_specialty', ''),           DARK_GREY,  row_bg),
+            ("B", row.get('plan_type', ''),                DARK_GREY,  row_bg),
+            ("C", int(row.get('compliant_counties', 0) or 0),    "375623", "E2EFDA"),
+            ("D", int(row.get('non_compliant_counties', 0) or 0),"C00000", "FFE0E0"),
+            ("E", int(row.get('total_counties', 0) or 0),         DARK_BLUE, row_bg),
+            ("F", pct,                                     DARK_BLUE,  row_bg),
+            ("G", int(row.get('access_failures', 0) or 0),        MID_BLUE,  LIGHT_BLUE),
+            ("H", int(row.get('count_failures', 0) or 0),         MID_BLUE,  LIGHT_BLUE),
+        ]
+
+        for col, val, txt_color, bg_color in data:
+            c = ws[f"{col}{r}"]
+            c.value = val
+            c.font = Font(name="Arial", color=txt_color, size=10,
+                          bold=(col == "F"))
+            c.fill = fill(bg_color)
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = thin_border()
+            if col == "F":
+                c.number_format = "0.0%"
+
+        ws.row_dimensions[r].height = 16
+
+    # ── GRADIENT COLOR SCALE ON % COMPLIANT (col F) ──────────
+    last_row = len(df_summary) + 4
+    ws.conditional_formatting.add(
+        f"F5:F{last_row}",
+        ColorScaleRule(
+            start_type="num", start_value=0,   start_color="C00000",
+            mid_type="num",   mid_value=0.5,   mid_color="FFEB84",
+            end_type="num",   end_value=1,     end_color="375623"
+        )
+    )
+
+    return ws
+
+
+# ── MAIN ─────────────────────────────────────────────────────
+import pandas as pd
+from google.cloud import bigquery
+    client = bigquery.Client(project=CLIENT_PROJECT)
+
+    print("Querying compliance data...")
     df = client.query(COMPLIANCE_QUERY).to_dataframe()
     print(f"  {len(df):,} rows")
+
+    print("Querying specialty summary...")
+    df_summary = client.query(SUMMARY_SPECIALTY_QUERY).to_dataframe()
+    print(f"  {len(df_summary):,} rows")
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -530,6 +674,9 @@ if __name__ == "__main__":
 
     print("Building Tab 2...")
     build_tab2(wb, df)
+
+    print("Building Tab 3...")
+    build_tab3(wb, df_summary)
 
     output = "medicare_supply_demand_v2.xlsx"
     wb.save(output)
