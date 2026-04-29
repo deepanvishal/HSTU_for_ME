@@ -656,6 +656,8 @@ def build_tab3(wb, df_summary):
 # ── MAIN ─────────────────────────────────────────────────────
 import pandas as pd
 from google.cloud import bigquery
+
+if __name__ == "__main__":
     client = bigquery.Client(project=CLIENT_PROJECT)
 
     print("Querying compliance data...")
